@@ -57,7 +57,7 @@ cp .env.example .env
 - `PORT` — the clawd-web server port (default `7800`)
 - `OPENCLAW_WS_URL` — override the WebSocket URL (default `ws://127.0.0.1:<port>`)
 - `OPENCLAW_TOKEN` — override the gateway auth token
-- `OPENCLAW_SESSION_KEY` — session to load (default `agent:clawdadsonnet:main`)
+- `OPENCLAW_SESSION_KEY` — session to load (default `agent:clawd:main`)
 
 ## Features
 

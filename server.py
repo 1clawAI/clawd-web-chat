@@ -52,7 +52,7 @@ def resolve_gateway_settings():
     return {
         "wsUrl": os.environ.get("OPENCLAW_WS_URL") or f"ws://127.0.0.1:{port}",
         "token": os.environ.get("OPENCLAW_TOKEN") or token,
-        "sessionKey": os.environ.get("OPENCLAW_SESSION_KEY") or "agent:clawdadsonnet:main",
+        "sessionKey": os.environ.get("OPENCLAW_SESSION_KEY") or "agent:clawd:main",
     }
 
 

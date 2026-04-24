@@ -214,7 +214,7 @@
   <label>Auth Token</label>
   <input id="optToken" type="password" placeholder="gateway.auth.token" />
   <label>Session Key</label>
-  <input id="optSessionKey" placeholder="agent:default:main" />
+  <input id="optSessionKey" placeholder="agent:clawd:main" />
   <label>Thinking</label>
   <select id="optThinking">
     <option value="off">off</option>
@@ -379,7 +379,7 @@ $btnSettingsSave.onclick = async () => {
   const cfg = {
     wsUrl: $optWsUrl.value.trim(),
     token: $optToken.value.trim(),
-    sessionKey: $optSessionKey.value.trim() || "agent:default:main",
+    sessionKey: $optSessionKey.value.trim() || "agent:clawd:main",
   };
   localStorage.setItem("clawd.config", JSON.stringify(cfg));
   state.thinking = $optThinking.value;
@@ -989,7 +989,7 @@ async function boot() {
     }
   }
   if (!state.config?.wsUrl) state.config = { ...(state.config || {}), wsUrl: "ws://127.0.0.1:18789" };
-  if (!state.config?.sessionKey) state.config.sessionKey = "agent:default:main";
+  if (!state.config?.sessionKey) state.config.sessionKey = "agent:clawd:main";
 
   if (!state.config.token) {
     setStatus("bad", "no token — open settings");
