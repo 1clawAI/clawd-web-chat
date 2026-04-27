@@ -11,6 +11,7 @@ No pip deps, stdlib only.
 import json
 import os
 import sys
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def load_openclaw_config():
 
 
 def resolve_gateway_settings():
-    """Return {wsUrl, token, sessionKey} — env vars override openclaw.json."""
+    """Return {wsUrl, token, sessionKey, bankrKey} — env vars override openclaw.json."""
     cfg = load_openclaw_config()
     gateway = cfg.get("gateway", {})
     port = gateway.get("port", 18789)
@@ -53,6 +54,7 @@ def resolve_gateway_settings():
         "wsUrl": os.environ.get("OPENCLAW_WS_URL") or f"ws://127.0.0.1:{port}",
         "token": os.environ.get("OPENCLAW_TOKEN") or token,
         "sessionKey": os.environ.get("OPENCLAW_SESSION_KEY") or "agent:clawd:main",
+        "bankrKey": os.environ.get("BANKR_LLM_KEY") or "",
     }
 
 
@@ -69,11 +71,62 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self.serve_file("index.html", "text/html; charset=utf-8")
         elif path == "/config":
-            self.send_json(resolve_gateway_settings())
+            cfg = resolve_gateway_settings()
+            cfg.pop("bankrKey", None)  # keep API key server-side only
+            self.send_json(cfg)
         elif path == "/health":
             self.send_json({"status": "ok"})
+        elif path.startswith("/clawdassets/"):
+            name = path[len("/clawdassets/"):]
+            if "/" in name or not name:
+                self.send_error(404)
+                return
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            mime = {"mp4": "video/mp4", "webm": "video/webm", "png": "image/png",
+                    "jpg": "image/jpeg", "gif": "image/gif", "svg": "image/svg+xml"}.get(ext, "application/octet-stream")
+            self.serve_file(f"clawdassets/{name}", mime)
         else:
             self.send_error(404)
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/autotitle":
+            self.handle_autotitle()
+        else:
+            self.send_error(404)
+
+    def handle_autotitle(self):
+        bankr_key = os.environ.get("BANKR_LLM_KEY", "")
+        if not bankr_key:
+            self.send_json({"error": "no bankr key"}, status=503)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            messages = body.get("messages", [])
+            req_body = json.dumps({
+                "model": "minimax-m2.7",
+                "max_tokens": 200,
+                "messages": [
+                    {"role": "system", "content": "You generate ultra-short chat tab titles. Reply with ONLY 2-3 words, no punctuation, no explanation, no thinking."},
+                ] + messages,
+            }).encode()
+            req = urllib.request.Request(
+                "https://llm.bankr.bot/v1/chat/completions",
+                data=req_body,
+                headers={"Content-Type": "application/json", "X-API-Key": bankr_key},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            raw = data["choices"][0]["message"]["content"]
+            # strip <think>...</think> reasoning blocks
+            import re
+            title = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            title = re.sub(r'["""\'\'.,!?:;]', "", title).strip()[:40]
+            self.send_json({"title": title})
+        except Exception as e:
+            self.send_json({"error": str(e)}, status=500)
 
     def do_OPTIONS(self):
         self.send_response(204)
