@@ -10,10 +10,35 @@ No pip deps, stdlib only.
 """
 import json
 import os
+import queue
 import sys
+import threading
 import urllib.request
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from socketserver import ThreadingMixIn, TCPServer
+
+
+class ThreadedHTTPServer(ThreadingMixIn, TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+# ── SSE broadcast ─────────────────────────────────────────────────────────────
+_sse_clients: list[queue.Queue] = []
+_sse_lock = threading.Lock()
+
+
+def push_event(data: str):
+    with _sse_lock:
+        dead = []
+        for q in _sse_clients:
+            try:
+                q.put_nowait(data)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            _sse_clients.remove(q)
 
 
 # ── Load .env (optional) ─────────────────────────────────────────────────────
@@ -76,6 +101,33 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(cfg)
         elif path == "/health":
             self.send_json({"status": "ok"})
+        elif path == "/events":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            q: queue.Queue = queue.Queue(maxsize=32)
+            with _sse_lock:
+                _sse_clients.append(q)
+            try:
+                while True:
+                    try:
+                        data = q.get(timeout=15)
+                        self.wfile.write(f"data: {data}\n\n".encode())
+                        self.wfile.flush()
+                    except queue.Empty:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+            except Exception:
+                pass
+            finally:
+                with _sse_lock:
+                    try:
+                        _sse_clients.remove(q)
+                    except ValueError:
+                        pass
+            return
         elif path.startswith("/clawdassets/"):
             name = path[len("/clawdassets/"):]
             if "/" in name or not name:
@@ -92,6 +144,11 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/autotitle":
             self.handle_autotitle()
+        elif path == "/trigger-mic":
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            push_event("toggle-mic")
+            self.send_json({"ok": True})
         else:
             self.send_error(404)
 
@@ -189,9 +246,10 @@ if __name__ == "__main__":
     print(f"   token     → {'set' if settings['token'] else 'MISSING — check ~/.openclaw/openclaw.json'}")
     if not settings["token"]:
         print("[warn] no gateway token found — the UI will prompt you to paste one")
+    print("   hotkey    → run `python3 hotkey.py` in a separate terminal for Ctrl+.")
     check_allowed_origins(PORT)
     try:
-        HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+        ThreadedHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
     except KeyboardInterrupt:
         print("\nbye")
         sys.exit(0)

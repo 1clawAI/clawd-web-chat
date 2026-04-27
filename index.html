@@ -32,15 +32,15 @@
     --radius: 12px;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; background: #ffffff; font-family: var(--font-sans); font-size: 16px; line-height: 1.5; overflow: hidden; height: 100%; }
+  html, body { margin: 0; background: #00aa00; font-family: var(--font-sans); font-size: 16px; line-height: 1.5; overflow: hidden; height: 100%; }
 
   @keyframes pulse  { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
   @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 
   /* ── Widget: full-height transparent overlay, bottom-left ────────────── */
   #widget {
-    position: fixed; left: 0; top: 0; bottom: 0;
-    width: clamp(420px, 38vw, 640px);
+    position: fixed; left: 0; top: 0; bottom: 15px; right: 0;
+    width: 100%;
     display: flex; flex-direction: column;
     pointer-events: none;
     z-index: 9999; color: var(--fg);
@@ -52,19 +52,16 @@
   #bubble {
     display: none; flex-direction: column; gap: 6px;
     position: fixed; bottom: 60px; left: 8px;
-    width: 148px;
+    width: 178px;
     cursor: pointer; user-select: none; pointer-events: auto;
   }
   #bubble:hover { filter: brightness(1.1); }
   #bubbleVid video { width: 100%; border-radius: 8px; display: block; }
   #bubbleLastMsg {
-    background: rgba(30,10,10,0.75); border: 1px solid rgba(90,32,32,0.4);
+    background: var(--bg2); border: 1px solid var(--border);
     border-radius: 8px; padding: 8px 10px;
     font-size: 13px; color: var(--fg2); line-height: 1.4;
     max-height: 72px; overflow: hidden;
-    -webkit-mask-image: linear-gradient(to bottom, black 40%, transparent 100%);
-    mask-image: linear-gradient(to bottom, black 40%, transparent 100%);
-    backdrop-filter: blur(4px);
   }
   #widget.minimized #bubble { display: flex; }
   #widget.minimized #panel  { display: none; }
@@ -83,7 +80,7 @@
 
   /* ── Sidebar: floating tab pills on the left ──────────────────────────── */
   #sidebar {
-    width: 148px; flex-shrink: 0;
+    width: 178px; flex-shrink: 0;
     display: flex; flex-direction: column;
     padding: 16px 6px 8px;
     pointer-events: none;
@@ -97,24 +94,21 @@
     overflow-y: auto; overflow-x: hidden;
     display: flex; flex-direction: column; gap: 4px;
     scrollbar-width: none;
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 20%);
-    mask-image: linear-gradient(to bottom, transparent 0%, black 20%);
   }
   .tab {
     position: relative; padding: 7px 8px 7px 10px;
     border-radius: 7px; cursor: pointer; user-select: none;
-    color: var(--fg2); background: rgba(30,10,10,0.7);
-    border: 1px solid rgba(90,32,32,0.4);
+    color: var(--fg2); background: var(--bg2);
+    border: 1px solid var(--border);
     font-size: 12px; line-height: 1.3; transition: all 0.15s;
-    backdrop-filter: blur(4px);
   }
   .tab .label { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 14px; }
-  .tab:hover { background: rgba(60,20,20,0.85); color: var(--fg); border-color: var(--border); }
-  .tab.active { background: rgba(204,43,43,0.2); color: var(--fg); border-color: rgba(204,43,43,0.5); }
+  .tab:hover { background: var(--bg3); color: var(--fg); border-color: var(--border); }
+  .tab.active { background: #3d0c0c; color: var(--fg); border-color: var(--accent); }
   .tab.dirty:not(.active) .label::before { content: "● "; color: var(--warn); font-size: 9px; vertical-align: middle; }
   .tab .close {
     display: none; position: absolute; top: 3px; right: 3px;
-    background: rgba(0,0,0,0.5); border: none; color: var(--fg3);
+    background: var(--bg); border: none; color: var(--fg3);
     border-radius: 3px; font-size: 11px; padding: 0 4px; cursor: pointer; line-height: 1.4;
   }
   .tab:hover .close { display: block; }
@@ -140,21 +134,14 @@
 
   /* ── Main: messages + input ───────────────────────────────────────────── */
 
-  /* Messages float up from bottom, fade out at top */
+  /* Messages float up from bottom */
   #msgArea {
     flex: 1; min-width: 0; overflow-y: auto; overflow-x: hidden;
     display: flex; flex-direction: column;
     padding: 0 10px 0 4px;
     scrollbar-width: none;
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.6) 25%, black 45%);
-    mask-image: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.6) 25%, black 45%);
-    transition: mask-image 0.3s, -webkit-mask-image 0.3s;
   }
   #msgArea::-webkit-scrollbar { display: none; }
-  #msgArea.scrolled-up {
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 8%);
-    mask-image: linear-gradient(to bottom, transparent 0%, black 8%);
-  }
   #transcript { margin-top: auto; display: flex; flex-direction: column; gap: 6px; padding: 8px 0 4px; }
   .transcript-pane { display: none; flex-direction: column; gap: 6px; }
   .transcript-pane.active { display: flex; }
@@ -163,7 +150,6 @@
   .msg {
     padding: 7px 10px; border-radius: 8px; border: 1px solid transparent;
     font-size: 14px; animation: fadeUp 0.2s ease;
-    backdrop-filter: blur(4px);
   }
   .msg .role {
     font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
@@ -174,19 +160,19 @@
   .msg .body a:visited { color: #a32222; }
   .msg .body a:hover { color: var(--accent2); }
   .msg .body code {
-    background: rgba(255,255,255,0.07); padding: 1px 4px; border-radius: 3px;
+    background: var(--bg3); padding: 1px 4px; border-radius: 3px;
     font-family: var(--font-mono); font-size: 0.9em;
   }
   .msg .body pre {
-    background: rgba(0,0,0,0.4); padding: 8px 10px; border-radius: 6px;
+    background: var(--bg); padding: 8px 10px; border-radius: 6px;
     overflow-x: auto; font-family: var(--font-mono); font-size: 11px;
-    border: 1px solid rgba(255,255,255,0.06); margin: 4px 0;
+    border: 1px solid var(--border); margin: 4px 0;
   }
-  .msg.user { background: rgba(204,43,43,0.12); border-color: rgba(204,43,43,0.2); }
-  .msg.assistant { background: rgba(30,10,10,0.6); border-color: rgba(255,255,255,0.05); overflow: hidden; }
+  .msg.user { background: #2e0909; border-color: #5a1515; }
+  .msg.assistant { background: var(--bg2); border-color: var(--border); overflow: hidden; }
   .msg.assistant::after { content: ""; display: table; clear: both; }
-  .msg.system { font-size: 11px; color: var(--fg3); background: transparent; }
-  .msg.error { background: rgba(61,16,16,0.7); border-color: var(--error-border); }
+  .msg.system { font-size: 11px; color: var(--fg3); background: var(--bg); }
+  .msg.error { background: var(--error); border-color: var(--error-border); }
   .msg.error .role { color: #ff9e9e; }
 
   /* Tool cards */
@@ -196,14 +182,14 @@
   }
   .tool-card .hdr {
     padding: 6px 10px; display: flex; align-items: center; gap: 6px; cursor: pointer;
-    user-select: none; background: rgba(0,0,0,0.25);
+    user-select: none; background: var(--bg);
   }
-  .tool-card .hdr:hover { background: rgba(0,0,0,0.35); }
+  .tool-card .hdr:hover { background: var(--bg2); }
   .tool-card .hdr .icon { flex-shrink: 0; }
-  .tool-card .hdr .name { color: #d4a060; font-weight: 500; }
+  .tool-card .hdr .name { color: #d4a060; font-weight: 500; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tool-card .hdr .status {
     font-size: 9px; text-transform: uppercase; padding: 1px 6px;
-    border-radius: 999px; background: rgba(255,255,255,0.07); color: var(--fg2);
+    border-radius: 999px; background: var(--bg3); color: var(--fg2);
   }
   .tool-card .hdr .status.running { color: var(--warn); }
   .tool-card .hdr .status.done    { color: var(--ok); }
@@ -212,7 +198,7 @@
   .tool-card.open .hdr .chev { transform: rotate(90deg); }
   .tool-card .body-wrap { display: none; }
   .tool-card.open .body-wrap { display: block; }
-  .tool-card .section { padding: 6px 10px; border-top: 1px solid rgba(255,255,255,0.06); }
+  .tool-card .section { padding: 6px 10px; border-top: 1px solid var(--border); }
   .tool-card .section .label { color: var(--fg3); font-size: 9px; text-transform: uppercase; margin-bottom: 3px; letter-spacing: 0.05em; }
   .tool-card .section pre { margin: 0; padding: 0; background: transparent; border: none; white-space: pre-wrap; color: var(--fg); max-height: 240px; overflow-y: auto; }
 
@@ -244,17 +230,17 @@
   /* ── Input area: full-width bottom strip ─────────────────────────────── */
   #inputArea {
     flex-shrink: 0; padding: 6px 10px 10px 10px;
-    background: linear-gradient(to top, rgba(0,0,0,0.9) 70%, transparent);
+    background: transparent;
   }
   #composer { display: flex; flex-direction: column; gap: 6px; }
   #composer textarea {
-    width: 100%; background: rgba(20,6,6,0.75); color: var(--fg);
-    border: 1px solid rgba(90,32,32,0.5); border-radius: 10px; resize: none;
+    width: 100%; background: var(--bg2); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 10px; resize: none;
     font: inherit; font-size: 15px; padding: 9px 12px;
     min-height: 48px; max-height: 140px; line-height: 1.5;
-    backdrop-filter: blur(6px); box-sizing: border-box;
+    box-sizing: border-box;
   }
-  #composer textarea:focus { outline: none; border-color: rgba(204,43,43,0.6); }
+  #composer textarea:focus { outline: none; border-color: var(--accent); }
   #composer textarea::placeholder { color: var(--fg3); }
   #controlsRow {
     display: flex; align-items: center; gap: 8px;
@@ -262,15 +248,19 @@
   #modelPicker {
     flex: 1;
     padding: 5px 22px 5px 8px; border-radius: 6px;
-    border: 1px solid rgba(90,32,32,0.5); background: rgba(20,6,6,0.7); color: var(--fg3);
+    border: 1px solid var(--border); background: var(--bg2); color: var(--fg3);
     font: inherit; font-size: 11px; cursor: pointer;
     appearance: none; -webkit-appearance: none;
-    backdrop-filter: blur(4px);
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'><path fill='%23663333' d='M0 0l4 5 4-5z'/></svg>");
     background-repeat: no-repeat; background-position: right 8px center;
   }
   #modelPicker:focus { outline: 1px solid var(--accent); }
   #modelPicker:disabled { opacity: 0.4; cursor: not-allowed; }
+  #btnMic { font-size: 18px; }
+  #btnMic.recording { color: var(--bad); animation: pulse 1s infinite; }
+  #btnSpeak { font-size: 18px; }
+  #btnSpeak.active { color: var(--ok); }
+
   #btnSend {
     background: var(--accent); color: #fff; border: none; border-radius: 8px;
     padding: 6px 14px; font: inherit; font-size: 14px; font-weight: 700;
@@ -282,7 +272,7 @@
 
   /* ── Settings panel ───────────────────────────────────────────────────── */
   #settings {
-    position: fixed; bottom: 72px; left: 16px; width: 320px; z-index: 10000;
+    position: fixed; bottom: 72px; left: 16px; width: 384px; z-index: 10000;
     background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
     padding: 14px; box-shadow: 0 16px 48px rgba(0,0,0,0.6);
     display: none;
@@ -348,6 +338,9 @@
             <option value="bankr/claude-sonnet-4.6">Sonnet · $3/$15</option>
             <option value="bankr/claude-opus-4.6">Opus · $5/$25</option>
           </select>
+          <button class="sb-btn" type="button" id="btnSpeak" title="TTS off — click to enable">🔇</button>
+          <select id="voicePicker" style="display:none; flex:0 0 auto; max-width:160px; padding:4px 6px; border-radius:6px; border:1px solid var(--border); background:var(--bg2); color:var(--fg3); font:inherit; font-size:11px;"></select>
+          <button class="sb-btn" type="button" id="btnMic" title="Voice input">🎤</button>
           <button id="btnSend" type="submit">↑</button>
         </div>
       </form>
@@ -411,9 +404,9 @@ const clawdVid = (() => {
       chatting = true;
       play(CHAT);
     },
-    idle() {
+    idle(immediate = false) {
       chatting = false;
-      // let current clip finish naturally, then onEnded picks idle
+      if (immediate) play(nextIdle());
     },
   };
 })();
@@ -693,9 +686,11 @@ async function switchTab(id) {
     if ([...sel.options].some(o => o.value === t.selectedModel)) sel.value = t.selectedModel;
     else { sel.value = DEFAULT_MODEL; t.selectedModel = DEFAULT_MODEL; }
   }
+  ttsReset();
   // Restore draft for this tab
   $input.value = loadDraft(t);
   autosize($input);
+  requestAnimationFrame(() => $input.focus());
   setStatus(state.connected ? "ok" : "bad", t.sessionKey);
   updateSendButton();
   renderTabs();
@@ -974,6 +969,7 @@ function ensureTurn(runId, tab) {
     tickerId: null,
   };
   tab.runs.set(runId, t);
+  if (tab === currentTab()) ttsReset();
   // Working indicator + 1s elapsed ticker
   t.footerEl.innerHTML = `<div class="working"><span class="blink"></span><span class="label">working</span><span class="elapsed"></span></div>`;
   const labelEl = t.footerEl.querySelector(".label");
@@ -1069,7 +1065,10 @@ function handleChatEvent(payload) {
   if (chatState === "delta" || chatState === "final") {
     if (message) {
       const text = extractText(message.content);
-      if (text) { t.lastText = text; t.textEl.innerHTML = renderText(text); }
+      if (text) {
+        t.lastText = text; t.textEl.innerHTML = renderText(text);
+        if (tab === currentTab()) ttsFeed(text, chatState === "final");
+      }
       if (Array.isArray(message.content)) {
         for (const b of message.content) {
           if (b && (b.type === "tool_use" || b.type === "toolCall") && b.id) {
@@ -1697,6 +1696,15 @@ async function resetTab(tab) {
   }
 }
 
+// ── Click anywhere to focus input ─────────────────────────────────────────
+document.addEventListener("click", (e) => {
+  if ($widget.classList.contains("minimized")) return;
+  if (window.getSelection().toString().length > 0) return;
+  if (!e.target.closest("button, a, input, textarea, select, [role='button']")) {
+    $input.focus();
+  }
+});
+
 // ── Input handling ─────────────────────────────────────────────────────────
 const INPUT_DRAFT_KEY = "clawd.draft";
 function _readDrafts() { try { return JSON.parse(localStorage.getItem(INPUT_DRAFT_KEY) || "{}"); } catch { return {}; } }
@@ -1725,6 +1733,188 @@ $input.addEventListener("keydown", (e) => {
     onSend();
   }
 });
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "n" && e.ctrlKey && e.metaKey) {
+    e.preventDefault();
+    createTab();
+  }
+});
+
+// ── Text-to-speech ─────────────────────────────────────────────────────────
+const $btnSpeak = document.getElementById("btnSpeak");
+const $voicePicker = document.getElementById("voicePicker");
+let _ttsEnabled = localStorage.getItem("clawd.tts") === "1";
+let _ttsSpokenUpTo = "";
+let _ttsIdleTimer = null;
+
+function populateVoices() {
+  const voices = speechSynthesis.getVoices();
+  if (!voices.length) return;
+  const saved = localStorage.getItem("clawd.ttsVoice");
+  $voicePicker.innerHTML = "";
+  voices.forEach((v, i) => {
+    const opt = document.createElement("option");
+    opt.value = i;
+    opt.textContent = `${v.name} (${v.lang})`;
+    $voicePicker.appendChild(opt);
+  });
+  if (saved !== null) $voicePicker.value = saved;
+}
+speechSynthesis.addEventListener("voiceschanged", populateVoices);
+populateVoices();
+
+$voicePicker.addEventListener("change", () => {
+  localStorage.setItem("clawd.ttsVoice", $voicePicker.value);
+});
+
+$voicePicker.addEventListener("change", () => {
+  const voices = speechSynthesis.getVoices();
+  const utt = new SpeechSynthesisUtterance("hello world");
+  utt.voice = voices[parseInt($voicePicker.value)];
+  speechSynthesis.cancel();
+  speechSynthesis.speak(utt);
+});
+
+function ttsStrip(text) {
+  return text
+    .replace(/```[\s\S]*?```/g, "")          // fenced code blocks
+    .replace(/`[^`]*`/g, "")                  // inline code
+    .replace(/\*\*([^*]+)\*\*/g, "$1")        // bold
+    .replace(/\*([^*]+)\*/g, "$1")            // italic
+    .replace(/__([^_]+)__/g, "$1")            // bold underscore
+    .replace(/_([^_]+)_/g, "$1")              // italic underscore
+    .replace(/^#{1,6}\s+/gm, "")              // headings
+    .replace(/^\s*[-*+]\s+/gm, "")            // bullet points
+    .replace(/^\s*\d+\.\s+/gm, "")            // numbered lists
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")  // links → label only
+    .replace(/[>|]/g, "")                      // blockquotes, tables
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function ttsReset() {
+  _ttsSpokenUpTo = "";
+  clearTimeout(_ttsIdleTimer);
+  speechSynthesis.cancel();
+}
+
+function ttsFeed(fullText, isFinal) {
+  if (!_ttsEnabled) return;
+  const newPart = fullText.slice(_ttsSpokenUpTo.length);
+  if (!newPart) return;
+  function mkUtt(text) {
+    const utt = new SpeechSynthesisUtterance(ttsStrip(text));
+    const voices = speechSynthesis.getVoices();
+    const idx = parseInt($voicePicker.value);
+    if (voices[idx]) utt.voice = voices[idx];
+    utt.rate = 1.25;
+    utt.onstart = () => { clearTimeout(_ttsIdleTimer); clawdVid.chatting(); };
+    utt.onend   = () => { _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 250); };
+    return utt;
+  }
+  if (isFinal) {
+    const rem = newPart.trim();
+    if (rem) speechSynthesis.speak(mkUtt(rem));
+    _ttsSpokenUpTo = fullText;
+    return;
+  }
+  const m = newPart.match(/([\s\S]*[.!?\n])\s*/);
+  if (m) {
+    const toSpeak = m[1].trim();
+    if (toSpeak) speechSynthesis.speak(mkUtt(toSpeak));
+    _ttsSpokenUpTo += m[0];
+  }
+}
+
+function applyTtsState() {
+  $btnSpeak.classList.toggle("active", _ttsEnabled);
+  $btnSpeak.textContent = _ttsEnabled ? "🔊" : "🔇";
+  $btnSpeak.title = _ttsEnabled ? "TTS on — click to mute" : "TTS off — click to enable";
+  $voicePicker.style.display = _ttsEnabled ? "block" : "none";
+}
+applyTtsState();
+
+$btnSpeak.addEventListener("click", () => {
+  _ttsEnabled = !_ttsEnabled;
+  localStorage.setItem("clawd.tts", _ttsEnabled ? "1" : "0");
+  applyTtsState();
+  if (!_ttsEnabled) speechSynthesis.cancel();
+});
+
+// ── Voice input ────────────────────────────────────────────────────────────
+const $btnMic = document.getElementById("btnMic");
+let _recog = null;
+let _recording = false;
+let _cancelSend = false;
+
+function startRecording() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { renderError("Speech recognition not supported — needs Chrome/Edge."); return; }
+  const r = new SR();
+  r.continuous = true;
+  r.interimResults = true;
+  r.lang = "en-US";
+  let sessionFinal = "";
+  let silenceTimer = null;
+  const baseText = $input.value.trimEnd();
+
+  function resetSilenceTimer() {
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => { _cancelSend = false; stopRecording(); }, 1000);
+  }
+
+  r.onstart = () => {
+    _recording = true;
+    _cancelSend = false;
+    $btnMic.classList.add("recording");
+    $btnMic.title = "Recording… click to cancel";
+  };
+  r.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) sessionFinal += e.results[i][0].transcript;
+      else interim += e.results[i][0].transcript;
+    }
+    $input.value = (baseText ? baseText + " " : "") + sessionFinal + interim;
+    autosize($input);
+    resetSilenceTimer();
+  };
+  r.onerror = (e) => {
+    clearTimeout(silenceTimer);
+    if (e.error !== "aborted") console.warn("mic:", e.error);
+    _cancelSend = true;
+    stopRecording();
+  };
+  r.onend = () => {
+    clearTimeout(silenceTimer);
+    _recording = false;
+    $btnMic.classList.remove("recording");
+    $btnMic.title = "Voice input";
+    _recog = null;
+    if (!_cancelSend && $input.value.trim()) onSend();
+  };
+  _recog = r;
+  r.start();
+}
+
+function stopRecording() {
+  if (_recog) { try { _recog.stop(); } catch {} }
+}
+
+$btnMic.addEventListener("click", () => {
+  if (_recording) { _cancelSend = true; stopRecording(); }
+  else startRecording();
+});
+
+// SSE — receive global hotkey trigger from hotkey.py
+const _micEvents = new EventSource("/events");
+_micEvents.onmessage = (e) => {
+  if (e.data === "toggle-mic") {
+    if (_recording) { _cancelSend = true; stopRecording(); }
+    else startRecording();
+  }
+};
 
 // ── Model picker ───────────────────────────────────────────────────────────
 function initModelPicker() {
