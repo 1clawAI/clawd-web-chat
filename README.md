@@ -58,6 +58,17 @@ cp .env.example .env
 - `OPENCLAW_WS_URL` — override the WebSocket URL (default `ws://127.0.0.1:<port>`)
 - `OPENCLAW_TOKEN` — override the gateway auth token
 - `OPENCLAW_SESSION_KEY` — session to load (default `agent:clawd:main`)
+- `ELEVENLABS_API_KEY` — preferred TTS backend. Flash v2.5 model, ~200ms
+  TTFB, server streams audio bytes straight through to the browser as
+  they're generated. Default voice is Brian; override with
+  `ELEVENLABS_VOICE_ID` (any voice ID from the public library).
+- `OPENAI_API_KEY` — fallback TTS when no ElevenLabs key is set.
+  `gpt-4o-mini-tts` onyx voice with a craftsman-style delivery prompt
+  baked into `server.py`. Higher latency (~2s) but richer instruction
+  steering.
+- Without either key, the 🔊 toggle uses the browser's built-in
+  `speechSynthesis` voices. Selection is made server-side; the browser
+  always hits `/api/tts` and `/config` reports `ttsBackend`.
 
 ## Features
 

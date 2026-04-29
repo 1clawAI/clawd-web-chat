@@ -80,7 +80,7 @@
 
   /* ── Sidebar: floating tab pills on the left ──────────────────────────── */
   #sidebar {
-    width: 178px; flex-shrink: 0;
+    width: 280px; flex-shrink: 0;
     display: flex; flex-direction: column;
     padding: 16px 6px 8px;
     pointer-events: none;
@@ -339,7 +339,6 @@
             <option value="bankr/claude-opus-4.6">Opus · $5/$25</option>
           </select>
           <button class="sb-btn" type="button" id="btnSpeak" title="TTS off — click to enable">🔇</button>
-          <select id="voicePicker" style="display:none; flex:0 0 auto; max-width:160px; padding:4px 6px; border-radius:6px; border:1px solid var(--border); background:var(--bg2); color:var(--fg3); font:inherit; font-size:11px;"></select>
           <button class="sb-btn" type="button" id="btnMic" title="Voice input">🎤</button>
           <button id="btnSend" type="submit">↑</button>
         </div>
@@ -440,7 +439,7 @@ window.__eventLog = [];
   window.WebSocket = TappedWS;
 })();
 
-const DEFAULT_MODEL = "bankr/minimax-m2.7";
+const DEFAULT_MODEL = "bankr/claude-haiku-4.5";
 
 const state = {
   ws: null,
@@ -836,12 +835,13 @@ $btnSettingsSave.onclick = async () => {
 };
 
 // ── Rendering (per-tab) ────────────────────────────────────────────────────
-function renderUserMessage(text, tab) {
+function renderUserMessage(text, tab, ageMs = 0) {
   const el = document.createElement("div");
   el.className = "msg user";
   el.innerHTML = `<div class="role">You</div><div class="body"></div>`;
   el.querySelector(".body").innerHTML = renderText(text);
   tab.paneEl.appendChild(el);
+  scheduleMessageHide(el, ageMs);
   return el;
 }
 
@@ -856,6 +856,26 @@ function renderAssistantContainer(tab) {
   `;
   tab.paneEl.appendChild(el);
   return el;
+}
+
+const MESSAGE_HIDE_MS = 60_000;
+
+function scheduleMessageHide(el, ageMs = 0) {
+  if (!el) return;
+  const remaining = MESSAGE_HIDE_MS - ageMs;
+  if (remaining <= 0) { el.style.display = "none"; return; }
+  setTimeout(() => { el.style.display = "none"; }, remaining);
+}
+
+// Parse openclaw's "[Sat 2026-04-25 11:57 MDT]" or "[2026-04-25 11:57:43 MDT]"
+// from a user message's raw text. Treats the time as local — close enough for
+// fading old history when the user is on the same machine that sent it.
+function parseHistoryTimestamp(rawText) {
+  if (!rawText) return null;
+  const m = /\[(?:[A-Za-z]{3,9} )?(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}(?::\d{2})?)/.exec(String(rawText));
+  if (!m) return null;
+  const d = new Date(`${m[1]}T${m[2]}`);
+  return isNaN(d.getTime()) ? null : d.getTime();
 }
 
 function isModelSwitchMsg(text) {
@@ -1107,6 +1127,7 @@ function handleChatEvent(payload) {
     // models, deltas don't carry thinking content — it only appears in the
     // persisted message after the run completes.
     syncTurnFromHistory(tab, t).catch(() => {});
+    scheduleMessageHide(t.container);
   } else if (chatState === "aborted") {
     if (t.tickerId) clearInterval(t.tickerId);
     t.footerEl.innerHTML = `<div style="color:var(--warn); font-size:12px">⏹ aborted</div>`;
@@ -1467,6 +1488,7 @@ async function loadHistory(tab) {
       if (m.role === "toolResult" && m.toolCallId) toolResults.set(m.toolCallId, m);
     }
 
+    let lastUserTs = null;
     for (const m of msgs) {
       const role = m.role || "system";
       const content = m.content;
@@ -1478,12 +1500,16 @@ async function loadHistory(tab) {
         // Strip openclaw's "System: ..." injection + timestamp wrappers so
         // history renders the same as the live view did.
         const rawText = extractText(content);
+        lastUserTs = parseHistoryTimestamp(rawText) || lastUserTs;
         const typed = extractUserTypedText(rawText) || rawText || "(empty)";
-        renderUserMessage(typed, tab);
+        const ageMs = lastUserTs ? Date.now() - lastUserTs : 0;
+        renderUserMessage(typed, tab, ageMs);
       } else if (role === "assistant") {
         const assistantText = extractText(content);
         if (isModelSwitchMsg(assistantText)) continue;
         const container = renderAssistantContainer(tab);
+        const ageMs = lastUserTs ? Date.now() - lastUserTs : 0;
+        scheduleMessageHide(container, ageMs);
         const textEl = container.querySelector(".text");
         const toolsEl = container.querySelector(".tools");
         if (Array.isArray(content)) {
@@ -1743,38 +1769,17 @@ document.addEventListener("keydown", (e) => {
 
 // ── Text-to-speech ─────────────────────────────────────────────────────────
 const $btnSpeak = document.getElementById("btnSpeak");
-const $voicePicker = document.getElementById("voicePicker");
 let _ttsEnabled = localStorage.getItem("clawd.tts") === "1";
-let _ttsSpokenUpTo = "";
+let _ttsSpokenUpTo = 0;     // char count of fullText already enqueued/spoken
 let _ttsIdleTimer = null;
-
-function populateVoices() {
-  const voices = speechSynthesis.getVoices();
-  if (!voices.length) return;
-  const saved = localStorage.getItem("clawd.ttsVoice");
-  $voicePicker.innerHTML = "";
-  voices.forEach((v, i) => {
-    const opt = document.createElement("option");
-    opt.value = i;
-    opt.textContent = `${v.name} (${v.lang})`;
-    $voicePicker.appendChild(opt);
-  });
-  if (saved !== null) $voicePicker.value = saved;
-}
-speechSynthesis.addEventListener("voiceschanged", populateVoices);
-populateVoices();
-
-$voicePicker.addEventListener("change", () => {
-  localStorage.setItem("clawd.ttsVoice", $voicePicker.value);
-});
-
-$voicePicker.addEventListener("change", () => {
-  const voices = speechSynthesis.getVoices();
-  const utt = new SpeechSynthesisUtterance("hello world");
-  utt.voice = voices[parseInt($voicePicker.value)];
-  speechSynthesis.cancel();
-  speechSynthesis.speak(utt);
-});
+let _ttsMode = "browser";   // "elevenlabs" | "openai" | "browser"
+let _ttsAudio = null;       // active HTMLAudioElement (openai mode)
+let _ttsTurnId = 0;         // bumped on every reset; in-flight requests check this
+let _ttsChunkIndex = 0;     // 0 = first chunk this turn (lower split threshold)
+let _ttsQueue = [];         // [{ turnId, blobPromise }] played sequentially
+let _ttsAborts = [];        // active AbortControllers for in-flight /api/tts fetches
+let _ttsDraining = false;   // mutex — only one drain loop active at a time
+let _ttsResolveCurrent = null; // resolves the in-flight playback promise (for reset)
 
 function ttsStrip(text) {
   return text
@@ -1794,20 +1799,139 @@ function ttsStrip(text) {
 }
 
 function ttsReset() {
-  _ttsSpokenUpTo = "";
+  _ttsSpokenUpTo = 0;
+  _ttsChunkIndex = 0;
+  _ttsTurnId++;             // invalidate every in-flight chunk
+  _ttsQueue = [];
   clearTimeout(_ttsIdleTimer);
   speechSynthesis.cancel();
+  _ttsAborts.forEach(ac => { try { ac.abort(); } catch {} });
+  _ttsAborts = [];
+  if (_ttsAudio) {
+    try { _ttsAudio.pause(); } catch {}
+    _ttsAudio.src = "";
+    _ttsAudio = null;
+  }
+  // Unblock any drain loop awaiting the (now-stopped) audio.
+  if (_ttsResolveCurrent) { const r = _ttsResolveCurrent; _ttsResolveCurrent = null; r(); }
 }
+
+async function ttsFetchChunk(text, turnId) {
+  const ac = new AbortController();
+  _ttsAborts.push(ac);
+  try {
+    const res = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+      signal: ac.signal,
+    });
+    if (!res.ok) throw new Error(`tts ${res.status}: ${await res.text()}`);
+    if (turnId !== _ttsTurnId) return null;
+    return await res.blob();
+  } catch (e) {
+    if (e.name !== "AbortError") console.warn("[tts]", e.message);
+    return null;
+  } finally {
+    const i = _ttsAborts.indexOf(ac);
+    if (i >= 0) _ttsAborts.splice(i, 1);
+  }
+}
+
+function ttsPlayBlob(blob) {
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    _ttsAudio = audio;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      URL.revokeObjectURL(url);
+      if (_ttsAudio === audio) _ttsAudio = null;
+      if (_ttsResolveCurrent === finish) _ttsResolveCurrent = null;
+      resolve();
+    };
+    _ttsResolveCurrent = finish;
+    audio.onplay = () => { clearTimeout(_ttsIdleTimer); clawdVid.chatting(); };
+    audio.onended = finish;
+    audio.onerror = finish;
+    audio.play().catch(finish);
+  });
+}
+
+async function ttsDrainQueue() {
+  if (_ttsDraining) return;     // a drain loop is already running — it'll pick up new items
+  _ttsDraining = true;
+  try {
+    while (_ttsEnabled && _ttsQueue.length) {
+      const item = _ttsQueue.shift();
+      if (item.turnId !== _ttsTurnId) continue;
+      let blob = null;
+      try { blob = await item.blobPromise; } catch {}
+      if (item.turnId !== _ttsTurnId || !_ttsEnabled || !blob) continue;
+      await ttsPlayBlob(blob);
+    }
+  } finally {
+    _ttsDraining = false;
+  }
+  if (!_ttsAudio && !_ttsQueue.length) {
+    _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 250);
+  }
+}
+
+function ttsEnqueue(text) {
+  const stripped = ttsStrip(text).trim();
+  if (!stripped) return;
+  const turnId = _ttsTurnId;
+  const blobPromise = ttsFetchChunk(stripped, turnId);
+  _ttsQueue.push({ turnId, blobPromise });
+  ttsDrainQueue();
+}
+
+// First chunk: split on any pause (',' ';' ':' '.' '!' '?' '\n') for fast first-audio.
+// Later chunks: full sentence boundary only, for smoother delivery.
+const _TTS_FIRST_RE = /^([\s\S]*?[.,!?;:\n])\s/;
+const _TTS_SENT_RE  = /^([\s\S]*?[.!?\n])\s/;
+// Hard cap so a long unbroken stream doesn't stall forever.
+const _TTS_MAX_CHUNK = 240;
 
 function ttsFeed(fullText, isFinal) {
   if (!_ttsEnabled) return;
-  const newPart = fullText.slice(_ttsSpokenUpTo.length);
+  if (_ttsMode !== "browser") {
+    while (true) {
+      const newPart = fullText.slice(_ttsSpokenUpTo);
+      if (!newPart) return;
+      if (isFinal) {
+        ttsEnqueue(newPart);
+        _ttsSpokenUpTo = fullText.length;
+        _ttsChunkIndex++;
+        return;
+      }
+      const re = _ttsChunkIndex === 0 ? _TTS_FIRST_RE : _TTS_SENT_RE;
+      const m = newPart.match(re);
+      if (m) {
+        ttsEnqueue(m[1]);
+        _ttsSpokenUpTo += m[0].length;
+        _ttsChunkIndex++;
+        continue;            // try to drain more boundaries from same buffer
+      }
+      if (newPart.length >= _TTS_MAX_CHUNK) {
+        const cut = newPart.lastIndexOf(" ", _TTS_MAX_CHUNK);
+        const split = cut > 40 ? cut : _TTS_MAX_CHUNK;
+        ttsEnqueue(newPart.slice(0, split));
+        _ttsSpokenUpTo += split;
+        _ttsChunkIndex++;
+        continue;
+      }
+      return;                // wait for more text
+    }
+  }
+  // ── Browser SpeechSynthesis fallback (unchanged behavior) ──
+  const newPart = fullText.slice(_ttsSpokenUpTo);
   if (!newPart) return;
   function mkUtt(text) {
     const utt = new SpeechSynthesisUtterance(ttsStrip(text));
-    const voices = speechSynthesis.getVoices();
-    const idx = parseInt($voicePicker.value);
-    if (voices[idx]) utt.voice = voices[idx];
     utt.rate = 1.25;
     utt.onstart = () => { clearTimeout(_ttsIdleTimer); clawdVid.chatting(); };
     utt.onend   = () => { _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 250); };
@@ -1816,22 +1940,24 @@ function ttsFeed(fullText, isFinal) {
   if (isFinal) {
     const rem = newPart.trim();
     if (rem) speechSynthesis.speak(mkUtt(rem));
-    _ttsSpokenUpTo = fullText;
+    _ttsSpokenUpTo = fullText.length;
     return;
   }
   const m = newPart.match(/([\s\S]*[.!?\n])\s*/);
   if (m) {
     const toSpeak = m[1].trim();
     if (toSpeak) speechSynthesis.speak(mkUtt(toSpeak));
-    _ttsSpokenUpTo += m[0];
+    _ttsSpokenUpTo += m[0].length;
   }
 }
 
 function applyTtsState() {
   $btnSpeak.classList.toggle("active", _ttsEnabled);
   $btnSpeak.textContent = _ttsEnabled ? "🔊" : "🔇";
-  $btnSpeak.title = _ttsEnabled ? "TTS on — click to mute" : "TTS off — click to enable";
-  $voicePicker.style.display = _ttsEnabled ? "block" : "none";
+  const label = _ttsMode === "elevenlabs" ? "ElevenLabs"
+              : _ttsMode === "openai" ? "Onyx"
+              : "TTS";
+  $btnSpeak.title = _ttsEnabled ? `${label} on — click to mute` : `${label} off — click to enable`;
 }
 applyTtsState();
 
@@ -1839,7 +1965,7 @@ $btnSpeak.addEventListener("click", () => {
   _ttsEnabled = !_ttsEnabled;
   localStorage.setItem("clawd.tts", _ttsEnabled ? "1" : "0");
   applyTtsState();
-  if (!_ttsEnabled) speechSynthesis.cancel();
+  if (!_ttsEnabled) ttsReset();
 });
 
 // ── Voice input ────────────────────────────────────────────────────────────
@@ -1851,6 +1977,7 @@ let _cancelSend = false;
 function startRecording() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) { renderError("Speech recognition not supported — needs Chrome/Edge."); return; }
+  ttsReset();   // kill in-flight TTS so the mic doesn't pick up Matthew's voice
   const r = new SR();
   r.continuous = true;
   r.interimResults = true;
@@ -1861,7 +1988,7 @@ function startRecording() {
 
   function resetSilenceTimer() {
     clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(() => { _cancelSend = false; stopRecording(); }, 1000);
+    silenceTimer = setTimeout(() => { _cancelSend = false; stopRecording(); }, 777);
   }
 
   r.onstart = () => {
@@ -1952,7 +2079,19 @@ async function boot() {
       if (!state.config.wsUrl) state.config.wsUrl = cfg.wsUrl;
       if (!state.config.token) state.config.token = cfg.token;
       if (!state.config.bankrKey && cfg.bankrKey) state.config.bankrKey = cfg.bankrKey;
+      _ttsMode = (cfg.ttsBackend && cfg.ttsBackend !== "none") ? cfg.ttsBackend : "browser";
+      console.log("[tts] backend:", _ttsMode);
+      applyTtsState();
     } catch (e) { console.warn("no /config endpoint", e); }
+  } else {
+    // We had cached config in localStorage; still ask the server whether OpenAI TTS is available.
+    try {
+      const resp = await fetch("/config");
+      const cfg = await resp.json();
+      _ttsMode = (cfg.ttsBackend && cfg.ttsBackend !== "none") ? cfg.ttsBackend : "browser";
+      console.log("[tts] backend:", _ttsMode);
+      applyTtsState();
+    } catch {}
   }
   if (!state.config?.wsUrl) state.config = { ...(state.config || {}), wsUrl: "ws://127.0.0.1:18789" };
   if (!state.config.token) {

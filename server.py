@@ -13,6 +13,7 @@ import os
 import queue
 import sys
 import threading
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -68,8 +69,17 @@ def load_openclaw_config():
         return {}
 
 
+def tts_backend():
+    """Pick the active TTS backend by env var availability."""
+    if os.environ.get("ELEVENLABS_API_KEY"):
+        return "elevenlabs"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    return "none"
+
+
 def resolve_gateway_settings():
-    """Return {wsUrl, token, sessionKey, bankrKey} — env vars override openclaw.json."""
+    """Return {wsUrl, token, sessionKey, bankrKey, ttsBackend} — env vars override openclaw.json."""
     cfg = load_openclaw_config()
     gateway = cfg.get("gateway", {})
     port = gateway.get("port", 18789)
@@ -80,7 +90,17 @@ def resolve_gateway_settings():
         "token": os.environ.get("OPENCLAW_TOKEN") or token,
         "sessionKey": os.environ.get("OPENCLAW_SESSION_KEY") or "agent:clawd:main",
         "bankrKey": os.environ.get("BANKR_LLM_KEY") or "",
+        "ttsBackend": tts_backend(),
     }
+
+
+# Steers the gpt-4o-mini-tts delivery — see /api/tts.
+TTS_INSTRUCTIONS = (
+    "Speak like a seasoned craftsman sharing hard-won wisdom. Unhurried. "
+    "Warm. The kind of gravelly voice that comes from decades of real work. "
+    "Confident because you've seen it all. Not corporate. Not polished. "
+    "Just real. A guy you'd trust to build your house."
+)
 
 
 PORT = int(os.environ.get("PORT", "7800"))
@@ -144,6 +164,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/autotitle":
             self.handle_autotitle()
+        elif path == "/api/tts":
+            self.handle_tts()
         elif path == "/trigger-mic":
             length = int(self.headers.get("Content-Length", 0))
             self.rfile.read(length)
@@ -184,6 +206,98 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"title": title})
         except Exception as e:
             self.send_json({"error": str(e)}, status=500)
+
+    def handle_tts(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            text = (body.get("text") or "").strip()
+            if not text:
+                self.send_json({"error": "empty text"}, status=400)
+                return
+            backend = tts_backend()
+            if backend == "elevenlabs":
+                self._tts_elevenlabs(text[:4000])
+            elif backend == "openai":
+                self._tts_openai(text[:4000])
+            else:
+                self.send_json({"error": "no tts backend configured"}, status=503)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:500]
+            self.send_json({"error": f"upstream {e.code}: {detail}"}, status=502)
+        except Exception as e:
+            self.send_json({"error": str(e)}, status=500)
+
+    def _tts_elevenlabs(self, text):
+        api_key = os.environ["ELEVENLABS_API_KEY"]
+        voice_id = os.environ.get("ELEVENLABS_VOICE_ID") or "nPczCjzI2devNBz1zQrb"  # Brian
+        url = (
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
+            "?optimize_streaming_latency=3&output_format=mp3_44100_64"
+        )
+        req_body = json.dumps({
+            "text": text,
+            "model_id": "eleven_flash_v2_5",
+            "voice_settings": {
+                "stability": 0.65,
+                "similarity_boost": 0.5,
+                "use_speaker_boost": True,
+                "speed": 1.2,
+            },
+        }).encode()
+        req = urllib.request.Request(
+            url,
+            data=req_body,
+            headers={
+                "xi-api-key": api_key,
+                "Content-Type": "application/json",
+                "Accept": "audio/mpeg",
+            },
+            method="POST",
+        )
+        # Pipe ElevenLabs' chunked response straight through to the browser so
+        # the first audio bytes hit the client as soon as they're generated.
+        # No Content-Length + Connection: close = "read until EOF" streaming
+        # (works on HTTP/1.0 without chunked transfer encoding).
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            while True:
+                chunk = resp.read(2048)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+
+    def _tts_openai(self, text):
+        api_key = os.environ["OPENAI_API_KEY"]
+        req_body = json.dumps({
+            "model": "gpt-4o-mini-tts",
+            "voice": "onyx",
+            "input": text,
+            "instructions": TTS_INSTRUCTIONS,
+            "response_format": "mp3",
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/audio/speech",
+            data=req_body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            audio = resp.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(audio)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(audio)
 
     def do_OPTIONS(self):
         self.send_response(204)
