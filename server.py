@@ -171,6 +171,16 @@ class Handler(BaseHTTPRequestHandler):
             self.rfile.read(length)
             push_event("toggle-mic")
             self.send_json({"ok": True})
+        elif path == "/trigger-toggle-view":
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            push_event("toggle-view")
+            self.send_json({"ok": True})
+        elif path == "/trigger-reveal-history":
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            push_event("reveal-history")
+            self.send_json({"ok": True})
         else:
             self.send_error(404)
 

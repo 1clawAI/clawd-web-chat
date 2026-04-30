@@ -201,6 +201,8 @@
   .tool-card .section { padding: 6px 10px; border-top: 1px solid var(--border); }
   .tool-card .section .label { color: var(--fg3); font-size: 9px; text-transform: uppercase; margin-bottom: 3px; letter-spacing: 0.05em; }
   .tool-card .section pre { margin: 0; padding: 0; background: transparent; border: none; white-space: pre-wrap; color: var(--fg); max-height: 240px; overflow-y: auto; }
+  .tool-card.claude-code { border-color: #b88dd6; }
+  .tool-card.claude-code .hdr .name { color: #c8a4e0; }
 
   /* Thinking pill */
   .thinking-card {
@@ -439,7 +441,7 @@ window.__eventLog = [];
   window.WebSocket = TappedWS;
 })();
 
-const DEFAULT_MODEL = "bankr/claude-haiku-4.5";
+const DEFAULT_MODEL = "bankr/claude-sonnet-4.6";
 
 const state = {
   ws: null,
@@ -859,12 +861,23 @@ function renderAssistantContainer(tab) {
 }
 
 const MESSAGE_HIDE_MS = 60_000;
+const REVEAL_HISTORY_MS = 30_000;
 
 function scheduleMessageHide(el, ageMs = 0) {
   if (!el) return;
   const remaining = MESSAGE_HIDE_MS - ageMs;
+  if (el._hideTimer) { clearTimeout(el._hideTimer); el._hideTimer = null; }
   if (remaining <= 0) { el.style.display = "none"; return; }
-  setTimeout(() => { el.style.display = "none"; }, remaining);
+  el._hideTimer = setTimeout(() => { el.style.display = "none"; el._hideTimer = null; }, remaining);
+}
+
+function revealHistory(durationMs = REVEAL_HISTORY_MS) {
+  const all = document.querySelectorAll("#transcript .msg");
+  for (const el of all) {
+    if (el._hideTimer) { clearTimeout(el._hideTimer); el._hideTimer = null; }
+    el.style.display = "";
+    el._hideTimer = setTimeout(() => { el.style.display = "none"; el._hideTimer = null; }, durationMs);
+  }
 }
 
 // Parse openclaw's "[Sat 2026-04-25 11:57 MDT]" or "[2026-04-25 11:57:43 MDT]"
@@ -934,23 +947,44 @@ function updateThinkingCard(card, text) {
   card.querySelector(".preview").textContent = last.slice(0, 200);
 }
 
+function extractClaudePrompt(cmd) {
+  // Match: claude -p "..." or claude -p '...' or claude --print "..."
+  const m = cmd.match(/claude\s+(?:-p|--print)\s+(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/);
+  if (!m) return null;
+  return (m[1] || m[2] || "").replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\n/g, "\n");
+}
+
 function renderToolCard(parent, toolName, input, startOpen=false) {
   const card = document.createElement("div");
   card.className = "tool-card" + (startOpen ? " open" : "");
+
+  const cmd = (input && typeof input === "object") ? (input.command || "") : "";
+  const isClaudeCode = toolName === "exec" && /^\s*claude\s+(-p|--print)\b/.test(cmd);
+
   card.innerHTML = `
     <div class="hdr">
-      <span class="icon">🔧</span>
+      <span class="icon">${isClaudeCode ? "🧠" : "🔧"}</span>
       <span class="name"></span>
       <span class="status running">running</span>
       <span class="chev">›</span>
     </div>
     <div class="body-wrap">
-      <div class="section input-section"><div class="label">input</div><pre></pre></div>
+      <div class="section input-section"><div class="label"></div><pre></pre></div>
       <div class="section output-section" style="display:none"><div class="label">output</div><pre></pre></div>
     </div>
   `;
-  card.querySelector(".name").textContent = toolName || "tool";
-  card.querySelector(".input-section pre").textContent = formatToolData(input);
+  if (isClaudeCode) card.classList.add("claude-code");
+  card.querySelector(".name").textContent = isClaudeCode ? "Claude Code" : (toolName || "tool");
+  const inputLabel = card.querySelector(".input-section .label");
+  const inputPre = card.querySelector(".input-section pre");
+  if (isClaudeCode) {
+    const prompt = extractClaudePrompt(cmd);
+    inputLabel.textContent = "prompt";
+    inputPre.textContent = prompt || cmd;
+  } else {
+    inputLabel.textContent = "input";
+    inputPre.textContent = formatToolData(input);
+  }
   card.querySelector(".hdr").onclick = () => card.classList.toggle("open");
   parent.appendChild(card);
   return card;
@@ -2040,6 +2074,10 @@ _micEvents.onmessage = (e) => {
   if (e.data === "toggle-mic") {
     if (_recording) { _cancelSend = true; stopRecording(); }
     else startRecording();
+  } else if (e.data === "toggle-view") {
+    toggleMinimize();
+  } else if (e.data === "reveal-history") {
+    revealHistory();
   }
 };
 
