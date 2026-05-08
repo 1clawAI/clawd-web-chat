@@ -2055,8 +2055,9 @@ async function onSend() {
   // Fire Haiku stall-talk in parallel with the real RPC so the user hears
   // an ack within ~1s instead of waiting for the main model's first token.
   // Opening the ack window buffers any real text deltas that arrive before
-  // the ack response — guarantees ack speaks first.
-  if (_ttsEnabled) {
+  // the ack response — guarantees ack speaks first. Skip entirely for short
+  // messages and bare greetings — the real reply is faster than the stall.
+  if (_ttsEnabled && !shouldSkipAck(text)) {
     openAckWindow();
     fillerSpeak({
       kind: "ack",
@@ -2387,11 +2388,11 @@ function ttsEnqueue(text, kind = "real") {
 //   - thinking: fired (debounced) on agent.thinking deltas. Paraphrases.
 // Skipped silently if real text has already started or another filler is
 // already in flight (we don't want stacking — ack already covers most stalls).
-// Always-on trace for the ack pipeline so we can see in the console exactly
-// where it's getting dropped. Prefix is searchable: "[clawd-ack]".
-const _ackT0 = () => Date.now();
+// Trace for the ack pipeline. Quiet by default; set window.__clawdDebug=true
+// in the console to re-enable. Prefix is searchable: "[clawd-ack]".
 let _ackTraceStart = 0;
 function ackTrace(...args) {
+  if (!window.__clawdDebug) return;
   const dt = _ackTraceStart ? `+${Date.now() - _ackTraceStart}ms` : "0ms";
   console.log(`%c[clawd-ack ${dt}]`, "color:#ff8855;font-weight:bold", ...args);
 }
@@ -2480,22 +2481,33 @@ function closeAckWindow(reason) {
   }
 }
 
-// Reading clawd-md/CLAUDE.md files is the assistant looking at its own
-// instructions — i.e. *thinking*, not doing tool work. Don't narrate; just
-// emit a short thinking sound instead so it sounds like silent contemplation.
-const _BRAIN_PATH_RE = /(clawd-md\/|claude\.md$|\/\.claude\/|workspace-clawd\/)/i;
+// Touching clawd-md / CLAUDE.md / .claude / workspace-clawd files is the
+// assistant looking at its own instructions — *thinking*, not doing work.
+// Match ANY tool whose input mentions one of these paths (Read file_path,
+// Bash `cat`/`head`/`grep`, etc.). We just check for the path substring;
+// no need to enumerate command shapes.
+const _BRAIN_PATH_RE = /(clawd-md\/|claude\.md|\.claude\/|workspace-clawd\/)/i;
 const _BRAIN_SOUNDS = ["Hmm.", "Hmmm.", "Mmm.", "Hrmm.", "Hm, lemme see.", "Mm-hmm.", "Mmm, okay."];
 function isBrainFileRead(toolName, toolInput) {
-  if (toolName !== "Read") return false;
-  let path = "";
+  let inputStr = "";
   try {
-    const obj = typeof toolInput === "string" ? JSON.parse(toolInput) : toolInput;
-    path = obj?.file_path || obj?.path || "";
-  } catch { path = String(toolInput || ""); }
-  return !!path && _BRAIN_PATH_RE.test(path);
+    inputStr = typeof toolInput === "string" ? toolInput : JSON.stringify(toolInput || {});
+  } catch { inputStr = String(toolInput || ""); }
+  return _BRAIN_PATH_RE.test(inputStr);
 }
 function pickBrainSound() {
   return _BRAIN_SOUNDS[Math.floor(Math.random() * _BRAIN_SOUNDS.length)];
+}
+
+// Short messages and bare greetings don't need an ack — the model will
+// answer almost as fast as Haiku could stall, and the ack ends up echoing
+// the greeting back ("gm let me think" feels like an answer, not a stall).
+const _GREETING_RE = /^(gm|gn|gn8|good\s+(morning|night|evening|afternoon|day)|hi|hello|hey|howdy|sup|yo|hiya|greetings|hola|aloha|ok|k|kk|okay|thanks|thx|ty|cool|nice|great|got\s*it|cheers|bye|cya|night|morning)\b[!.?\s]*$/i;
+function shouldSkipAck(text) {
+  const t = (text || "").trim();
+  if (t.length < 10) return true;       // too short to bother
+  if (_GREETING_RE.test(t)) return true; // bare greeting
+  return false;
 }
 
 // Pull the last few user/assistant turns from the DOM as bare text — keeps
