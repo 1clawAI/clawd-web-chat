@@ -1326,7 +1326,10 @@ function ensureTurn(runId, tab) {
     tickerId: null,
   };
   tab.runs.set(runId, t);
-  if (tab === currentTab()) ttsReset();
+  // (Note: TTS state is reset in onSend at user-submit time, NOT here.
+  // Resetting here would abort the in-flight Haiku ack fetch via
+  // _ttsAborts, since the first WS event for a new run typically lands
+  // ~300ms after user-send — well before Haiku has had time to respond.)
   // Working indicator + 1s elapsed ticker
   t.footerEl.innerHTML = `<div class="working"><span class="blink"></span><span class="label">working</span><span class="elapsed"></span></div>`;
   const labelEl = t.footerEl.querySelector(".label");
