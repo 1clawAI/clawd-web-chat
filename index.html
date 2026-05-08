@@ -57,6 +57,18 @@
   }
   #bubble:hover { filter: brightness(1.1); }
   #bubbleVid video { width: 100%; border-radius: 8px; display: block; }
+
+  /* Video cross-fade wrapper (added in JS) */
+  .clawd-vid-wrap { position: relative; line-height: 0; }
+  .clawd-vid-wrap > video { width: 100%; display: block; border-radius: 8px; }
+  .clawd-vid-wrap > video.vid-overlay {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .clawd-vid-wrap > video.vid-overlay.snap { opacity: 1; }
+  .clawd-vid-wrap > video.vid-overlay.fading { opacity: 0; transition: opacity 0.4s ease; }
   #bubbleLastMsg {
     background: var(--bg2); border: 1px solid var(--border);
     border-radius: 8px; padding: 8px 10px;
@@ -65,6 +77,24 @@
   }
   #widget.minimized #bubble { display: flex; }
   #widget.minimized #panel  { display: none; }
+
+  #bubbleControls {
+    display: flex; align-items: center; gap: 6px;
+    padding: 0 2px;
+  }
+  #bubbleControls .bubbleBtn {
+    background: var(--bg2); border: 1px solid var(--border);
+    color: var(--fg2); width: 22px; height: 22px;
+    border-radius: 6px; cursor: pointer; font: inherit; font-size: 16px;
+    line-height: 1; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #bubbleControls .bubbleBtn:hover { background: var(--bg3); color: var(--fg); }
+  #bubbleControls .bubbleIcon {
+    font-size: 16px; line-height: 1; display: none;
+  }
+  #bubble.rec  #bubbleMicIcon   { display: inline-block; animation: pulse 1s infinite; }
+  #bubble.busy #bubbleThinkIcon { display: inline-block; animation: pulse 1.5s infinite; }
 
   /* ── Panel: transparent, full height ─────────────────────────────────── */
   #panel {
@@ -174,6 +204,17 @@
   .msg.system { font-size: 11px; color: var(--fg3); background: var(--bg); }
   .msg.error { background: var(--error); border-color: var(--error-border); }
   .msg.error .role { color: #ff9e9e; }
+  .msg.faded { display: none; }
+  .transcript-pane.revealing .msg.faded { display: block; }
+  .transcript-pane.revealing .hidden-counter { display: none; }
+  .hidden-counter {
+    align-self: center; cursor: pointer; user-select: none;
+    background: var(--bg2); border: 1px solid var(--border);
+    color: var(--fg3); font-size: 10px; font-family: var(--font-mono);
+    padding: 2px 8px; border-radius: 999px;
+    transition: color 0.1s, border-color 0.1s;
+  }
+  .hidden-counter:hover { color: var(--fg); border-color: var(--accent); }
 
   /* Tool cards */
   .tool-card {
@@ -300,6 +341,11 @@
 
   <!-- Minimized bubble -->
   <div id="bubble">
+    <div id="bubbleControls">
+      <button type="button" id="bubbleNewTab" class="bubbleBtn" title="New chat">+</button>
+      <span id="bubbleMicIcon" class="bubbleIcon" title="Listening">🎤</span>
+      <span id="bubbleThinkIcon" class="bubbleIcon" title="Thinking…">💭</span>
+    </div>
     <div id="bubbleVid">
       <video id="clawdVideoMin" autoplay muted playsinline src="clawdassets/idle_1.mp4"></video>
     </div>
@@ -375,38 +421,260 @@
 <script>
 // ── Clawd video state machine ─────────────────────────────────────────────
 const clawdVid = (() => {
-  const IDLE = ["clawdassets/idle_1.mp4", "clawdassets/idle_2.mp4"];
-  const CHAT = "clawdassets/chatting_1.mp4";
-  let chatting = false;
+  const IDLES = [
+    "clawdassets/idle_1.mp4",
+    "clawdassets/idle_2.mp4",
+    "clawdassets/idle.mp4",
+    "clawdassets/idle_lookaround.mp4",
+  ];
+  const RARE_BURGER  = "clawdassets/idle-rare-eats-a-burger.mp4";
+  const RARE_SMOKING = "clawdassets/idle-smoking.mp4";
+  const CHAT_DEFAULT = "clawdassets/chatting_1.mp4";
+  const CHAT_SHORT   = "clawdassets/short-subtle-talking.mp4";
+  const CHAT_DRUNK   = "clawdassets/talking-lil-drunk.mp4";
+  const CHAT_HELLO   = "clawdassets/talking-saying-hello.mp4";
+  const CHAT_EXPLAIN_HANDS = "clawdassets/talking-explaining-with-his-hands.mp4";
+  const CHAT_EXPLAIN = "clawdassets/explaining.mp4";
+  const CHAT_SATISFIED = "clawdassets/talking-satisfied-just-finished-something-good.mp4";
+  const FIRST_HELLO  = "clawdassets/saying-hello-for-the-first-time.mp4";
+  const BUILDING     = "clawdassets/building.mp4";
+  const BUILD_HAMMER_MED  = "clawdassets/hammering-tool-use-building-medium.mp4";
+  const BUILD_HAMMER_LONG = "clawdassets/longer-hammering-tool-use.mp4";
+  const BUILD_CLI_QUICK   = "clawdassets/quick-command-line-tool-use.mp4";
+  const BUILD_CLI_MED     = "clawdassets/medium-cli-or-tool-use.mp4";
+  const BUILD_CLI_LONG    = "clawdassets/longer-cli-command-line-tool-use.mp4";
+  const THINKING     = "clawdassets/thinking-idle-light-thinking.mp4";
+  const DEEP_THINKING = "clawdassets/deep-in-thought-or-listening.mp4";
+  const LISTENING    = "clawdassets/thinking-listening.mp4";
 
-  function nextIdle() { return Math.random() < 0.2 ? IDLE[1] : IDLE[0]; }
+  const DEEP_THINK_AFTER_MS = 5000;
+  const BUILD_MED_AFTER_MS  = 8000;
+  const BUILD_LONG_AFTER_MS = 25000;
 
+  let _chatting = false;
+  let _building = false;
+  let _thinking = false;
+  let _listening = false;
+  let _deepTimer = null;
+  let _buildingCat = null;
+  let _buildingStartTs = 0;
+  let _buildStageTimers = [];
+
+  function categorizeTool(name) {
+    const n = (name || "").toLowerCase();
+    if (!n) return "hammer";
+    if (n === "bash" || n.includes("command") || n.includes("shell") || n.includes("exec") || n.includes("terminal") || n.includes("run_")) return "cli";
+    return "hammer";
+  }
+  function buildingSrcFor(cat, elapsedMs) {
+    if (cat === "cli") {
+      if (elapsedMs >= BUILD_LONG_AFTER_MS) return BUILD_CLI_LONG;
+      if (elapsedMs >= BUILD_MED_AFTER_MS)  return BUILD_CLI_MED;
+      return BUILD_CLI_QUICK;
+    }
+    if (elapsedMs >= BUILD_LONG_AFTER_MS) return BUILD_HAMMER_LONG;
+    if (elapsedMs >= BUILD_MED_AFTER_MS)  return BUILD_HAMMER_MED;
+    return BUILDING;
+  }
+
+  function nextIdle() {
+    const r = Math.random();
+    if (r < 0.005) return RARE_BURGER;        // ~1 in 200
+    if (r < 0.02)  return RARE_SMOKING;       // ~1.5%
+    return IDLES[Math.floor(Math.random() * IDLES.length)];
+  }
+
+  function nextChat(text, opts) {
+    opts = opts || {};
+    const t = (text || "").trim();
+    if (opts.satisfied) return CHAT_SATISFIED;
+    if (opts.firstEver) return FIRST_HELLO;
+    if (/^(hi|hello|hey|howdy|sup|yo|hiya|greetings)\b/i.test(t)) return CHAT_HELLO;
+    if (t.length > 0 && t.length < 40) return CHAT_SHORT;
+    if (t.length > 200) return Math.random() < 0.5 ? CHAT_EXPLAIN_HANDS : CHAT_EXPLAIN;
+    return CHAT_DEFAULT;
+  }
+
+  // Wrap each primary video and add an overlay layer for cross-fade.
+  const slots = ["clawdVideo", "clawdVideoMin"].map(id => {
+    const primary = document.getElementById(id);
+    const wrap = document.createElement("div");
+    wrap.className = "clawd-vid-wrap";
+    primary.parentNode.insertBefore(wrap, primary);
+    wrap.appendChild(primary);
+    const overlay = primary.cloneNode(false);
+    overlay.removeAttribute("id");
+    overlay.removeAttribute("src");
+    overlay.classList.add("vid-overlay");
+    wrap.appendChild(overlay);
+    // Once metadata is known, lock the wrapper's aspect-ratio so it never
+    // collapses while primary's src is reloading.
+    const setRatio = () => {
+      const w = primary.videoWidth, h = primary.videoHeight;
+      if (w && h) wrap.style.aspectRatio = `${w} / ${h}`;
+    };
+    if (primary.videoWidth) setRatio();
+    else primary.addEventListener("loadedmetadata", setRatio, { once: true });
+    return { primary, overlay, wrap };
+  });
+
+  const LOOPING_SRCS = new Set([
+    BUILDING, BUILD_HAMMER_MED, BUILD_HAMMER_LONG,
+    BUILD_CLI_QUICK, BUILD_CLI_MED, BUILD_CLI_LONG,
+    THINKING, DEEP_THINKING, LISTENING,
+  ]);
   function play(src) {
-    [document.getElementById("clawdVideo"), document.getElementById("clawdVideoMin")].forEach(v => {
-      v.src = src; v.play();
+    const shouldLoop = LOOPING_SRCS.has(src);
+    slots.forEach(({ primary, overlay, wrap }) => {
+      // Freeze wrapper's current pixel height so it can't collapse while
+      // primary's src is reloading (which would also shrink the absolute
+      // overlay at 100% of wrap height).
+      const h = wrap.offsetHeight;
+      if (h) wrap.style.minHeight = h + "px";
+      // Cancel any in-flight listeners.
+      if (overlay._onPlaying) overlay.removeEventListener("playing", overlay._onPlaying);
+      if (primary._onPlaying) primary.removeEventListener("playing", primary._onPlaying);
+      if (overlay._fadeTimer) { clearTimeout(overlay._fadeTimer); overlay._fadeTimer = null; }
+
+      primary.loop = shouldLoop;
+      overlay.loop = shouldLoop;
+
+      // Same src already → just ensure primary is playing, no transition.
+      if (primary.src && primary.src.endsWith(src) && !primary.paused) return;
+
+      // Reset overlay state.
+      overlay.classList.remove("snap", "fading");
+      overlay.src = src;
+      overlay.play().catch(() => {});
+
+      // If the file 404s or fails to decode, abort the transition so we
+      // don't leave the overlay stuck mid-state. Primary keeps playing
+      // whatever it had — graceful fallback for missing optional clips.
+      const onError = () => {
+        overlay.removeEventListener("error", onError);
+        overlay.removeEventListener("playing", onOverlayPlaying);
+        overlay._onPlaying = null;
+        overlay.classList.remove("snap", "fading");
+        wrap.style.minHeight = "";
+      };
+      overlay.addEventListener("error", onError, { once: true });
+
+      const onOverlayPlaying = () => {
+        overlay.removeEventListener("error", onError);
+        overlay.removeEventListener("playing", onOverlayPlaying);
+        overlay._onPlaying = null;
+
+        // Snap overlay to fully opaque (instant cover, no fade-in flash).
+        overlay.classList.add("snap");
+
+        const onPrimaryPlaying = () => {
+          primary.removeEventListener("playing", onPrimaryPlaying);
+          primary._onPlaying = null;
+          try { primary.currentTime = overlay.currentTime; } catch (_) {}
+          // Now fade overlay out, revealing primary which is in sync.
+          requestAnimationFrame(() => {
+            overlay.classList.remove("snap");
+            overlay.classList.add("fading");
+            overlay._fadeTimer = setTimeout(() => {
+              overlay.classList.remove("fading");
+              overlay._fadeTimer = null;
+              wrap.style.minHeight = "";
+            }, 450);
+          });
+        };
+        primary._onPlaying = onPrimaryPlaying;
+        primary.addEventListener("playing", onPrimaryPlaying);
+        // Wait one frame so 'snap' is committed before we kick the primary
+        // src reload (which momentarily blanks it underneath the cover).
+        requestAnimationFrame(() => {
+          primary.src = src;
+          primary.play().catch(() => {});
+        });
+      };
+      overlay._onPlaying = onOverlayPlaying;
+      overlay.addEventListener("playing", onOverlayPlaying);
     });
   }
 
   function onEnded() {
-    if (chatting) {
-      chatting = false;  // play chatting once, then return to idle
-      play(nextIdle());
-    } else {
-      play(nextIdle());
+    // building/thinking loop, so onEnded won't fire while in those states.
+    if (_chatting) _chatting = false;  // play chatting once, then return to idle
+    play(nextIdle());
+  }
+
+  // Only the primary drives 'ended'; the overlay is fading and we don't care.
+  slots.forEach(({ primary }) => primary.addEventListener("ended", onEnded));
+
+  function clearAll() {
+    _chatting = _building = _thinking = _listening = false;
+    _buildingCat = null;
+    _buildingStartTs = 0;
+    if (_deepTimer) { clearTimeout(_deepTimer); _deepTimer = null; }
+    if (_buildStageTimers.length) {
+      _buildStageTimers.forEach(clearTimeout);
+      _buildStageTimers = [];
     }
   }
 
-  [document.getElementById("clawdVideo"), document.getElementById("clawdVideoMin")].forEach(v => {
-    v.addEventListener("ended", onEnded);
-  });
-
   return {
-    chatting() {
-      chatting = true;
-      play(CHAT);
+    chatting(text, opts) {
+      // Already chatting: don't re-pick a variant mid-clip (TTS chunk
+      // boundaries call this repeatedly — let the current clip finish).
+      _building = false;
+      _thinking = false;
+      _listening = false;
+      if (_deepTimer) { clearTimeout(_deepTimer); _deepTimer = null; }
+      if (_chatting) return;
+      _chatting = true;
+      play(nextChat(text, opts));
+    },
+    building(toolName) {
+      const cat = categorizeTool(toolName);
+      if (_building && cat === _buildingCat) return;  // same category, keep looping
+
+      if (!_building) {
+        clearAll();
+        _building = true;
+        _buildingStartTs = Date.now();
+      }
+      _buildingCat = cat;
+
+      const elapsed = Date.now() - _buildingStartTs;
+      play(buildingSrcFor(cat, elapsed));
+
+      // Cancel previous stage timers; schedule remaining stage transitions.
+      _buildStageTimers.forEach(clearTimeout);
+      _buildStageTimers = [];
+      if (elapsed < BUILD_MED_AFTER_MS) {
+        _buildStageTimers.push(setTimeout(() => {
+          if (_building) play(buildingSrcFor(_buildingCat, BUILD_MED_AFTER_MS));
+        }, BUILD_MED_AFTER_MS - elapsed));
+      }
+      if (elapsed < BUILD_LONG_AFTER_MS) {
+        _buildStageTimers.push(setTimeout(() => {
+          if (_building) play(buildingSrcFor(_buildingCat, BUILD_LONG_AFTER_MS));
+        }, BUILD_LONG_AFTER_MS - elapsed));
+      }
+    },
+    thinking() {
+      if (_thinking) return;
+      clearAll();
+      _thinking = true;
+      play(THINKING);
+      // After a few seconds of waiting, switch to deeper thinking variant.
+      _deepTimer = setTimeout(() => {
+        _deepTimer = null;
+        if (_thinking) play(DEEP_THINKING);
+      }, DEEP_THINK_AFTER_MS);
+    },
+    listening() {
+      if (_listening) return;
+      clearAll();
+      _listening = true;
+      play(LISTENING);
     },
     idle(immediate = false) {
-      chatting = false;
+      clearAll();
       if (immediate) play(nextIdle());
     },
   };
@@ -481,14 +749,29 @@ function setStatus(s, text) {
 function toggleMinimize() {
   const minimized = $widget.classList.toggle("minimized");
   $widget.classList.toggle("expanded", !minimized);
+  localStorage.setItem("clawd.minimized", minimized ? "1" : "0");
   if (!minimized) {
     // re-focus input when expanding
     requestAnimationFrame(() => $input.focus());
   }
 }
+
+if (localStorage.getItem("clawd.minimized") === "1") {
+  $widget.classList.add("minimized");
+  $widget.classList.remove("expanded");
+}
 document.getElementById("bubble").addEventListener("click", toggleMinimize);
 document.getElementById("clawdVid").addEventListener("click", toggleMinimize);
 $btnNewTab.addEventListener("click", () => createTab());
+
+document.getElementById("bubbleControls").addEventListener("click", (e) => e.stopPropagation());
+document.getElementById("bubbleNewTab").addEventListener("click", () => createTab());
+
+const $bubble = document.getElementById("bubble");
+setInterval(() => {
+  $bubble.classList.toggle("rec", !!_recording);
+  $bubble.classList.toggle("busy", state.tabs.some(t => t.activeRunId));
+}, 250);
 
 function autosize($el) {
   $el.style.height = "auto";
@@ -843,7 +1126,7 @@ function renderUserMessage(text, tab, ageMs = 0) {
   el.innerHTML = `<div class="role">You</div><div class="body"></div>`;
   el.querySelector(".body").innerHTML = renderText(text);
   tab.paneEl.appendChild(el);
-  scheduleMessageHide(el, ageMs);
+  applyVisibility(tab.paneEl);
   return el;
 }
 
@@ -860,24 +1143,44 @@ function renderAssistantContainer(tab) {
   return el;
 }
 
-const MESSAGE_HIDE_MS = 60_000;
+const KEEP_VISIBLE_COUNT = 2;
 const REVEAL_HISTORY_MS = 30_000;
 
-function scheduleMessageHide(el, ageMs = 0) {
-  if (!el) return;
-  const remaining = MESSAGE_HIDE_MS - ageMs;
-  if (el._hideTimer) { clearTimeout(el._hideTimer); el._hideTimer = null; }
-  if (remaining <= 0) { el.style.display = "none"; return; }
-  el._hideTimer = setTimeout(() => { el.style.display = "none"; el._hideTimer = null; }, remaining);
+function applyVisibility(pane) {
+  if (!pane) return;
+  const msgs = Array.from(pane.querySelectorAll(":scope > .msg"));
+  const hideUpTo = Math.max(0, msgs.length - KEEP_VISIBLE_COUNT);
+  msgs.forEach((el, i) => el.classList.toggle("faded", i < hideUpTo));
+
+  let counter = pane.querySelector(":scope > .hidden-counter");
+  if (hideUpTo > 0) {
+    if (!counter) {
+      counter = document.createElement("div");
+      counter.className = "hidden-counter";
+      counter.title = "Show hidden messages";
+      counter.addEventListener("click", () => revealHistory(pane));
+    }
+    counter.textContent = `[${hideUpTo}]`;
+    const firstVisible = msgs[hideUpTo];
+    if (firstVisible) pane.insertBefore(counter, firstVisible);
+    else pane.appendChild(counter);
+  } else if (counter) {
+    counter.remove();
+  }
 }
 
-function revealHistory(durationMs = REVEAL_HISTORY_MS) {
-  const all = document.querySelectorAll("#transcript .msg");
-  for (const el of all) {
-    if (el._hideTimer) { clearTimeout(el._hideTimer); el._hideTimer = null; }
-    el.style.display = "";
-    el._hideTimer = setTimeout(() => { el.style.display = "none"; el._hideTimer = null; }, durationMs);
+function revealHistory(pane, durationMs = REVEAL_HISTORY_MS) {
+  if (!pane) {
+    const tab = currentTab();
+    pane = tab && tab.paneEl;
   }
+  if (!pane) return;
+  if (pane._revealTimer) clearTimeout(pane._revealTimer);
+  pane.classList.add("revealing");
+  pane._revealTimer = setTimeout(() => {
+    pane.classList.remove("revealing");
+    pane._revealTimer = null;
+  }, durationMs);
 }
 
 // Parse openclaw's "[Sat 2026-04-25 11:57 MDT]" or "[2026-04-25 11:57:43 MDT]"
@@ -1120,6 +1423,7 @@ function handleChatEvent(payload) {
     if (message) {
       const text = extractText(message.content);
       if (text) {
+        if (chatState === "delta") clawdVid.chatting(text);
         t.lastText = text; t.textEl.innerHTML = renderText(text);
         if (tab === currentTab()) ttsFeed(text, chatState === "final");
       }
@@ -1156,12 +1460,16 @@ function handleChatEvent(payload) {
     resolveTabRunCompletion(tab, runId, null);
     tab.turnCount = (tab.turnCount || 0) + 1;
     if (tab.turnCount === 3 || tab.turnCount === 9) autoTitleTab(tab).catch(() => {});
-    clawdVid.chatting();
+    const usedTools = t.toolCards && t.toolCards.size > 0;
+    clawdVid.chatting(t.lastText || "", {
+      firstEver: tab.turnCount === 1,
+      satisfied: usedTools,
+    });
     // Sync thinking + tool blocks from server-side history. For non-Anthropic
     // models, deltas don't carry thinking content — it only appears in the
     // persisted message after the run completes.
     syncTurnFromHistory(tab, t).catch(() => {});
-    scheduleMessageHide(t.container);
+    applyVisibility(tab.paneEl);
   } else if (chatState === "aborted") {
     if (t.tickerId) clearInterval(t.tickerId);
     t.footerEl.innerHTML = `<div style="color:var(--warn); font-size:12px">⏹ aborted</div>`;
@@ -1198,12 +1506,27 @@ function handleAgentEvent(payload) {
     const callId = data?.toolCallId || data?.id || ("call-" + Date.now());
     const phase = data?.phase;
     if (phase === "start") {
+      const baseName = data?.name || data?.toolName || "tool";
+      clawdVid.building(baseName);
       if (!t.toolCards.has(callId)) {
-        const baseName = data?.name || data?.toolName || "tool";
         const argPreview = data?.args?.command || data?.args?.path || data?.args?.url;
         const title = argPreview ? `${baseName}: ${String(argPreview).slice(0, 60)}` : baseName;
         const card = renderToolCard(t.toolsEl, title, data?.args || data?.input);
         t.toolCards.set(callId, card);
+      }
+      // Have Haiku narrate the tool call, casually, while it's running —
+      // unless he's reading his own brain (clawd-md / CLAUDE.md), in which
+      // case just emit a short thinking sound (no narration of the path).
+      if (_ttsEnabled && tab === currentTab() && !_ttsRealArrived && _fillerLastToolId !== callId) {
+        _fillerLastToolId = callId;
+        const inputObj = data?.args || data?.input;
+        if (isBrainFileRead(baseName, inputObj)) {
+          if (_fillerInflight === 0) ttsEnqueue(pickBrainSound(), "tool");
+        } else {
+          let inputStr = "";
+          try { inputStr = inputObj ? JSON.stringify(inputObj).slice(0, 300) : ""; } catch {}
+          fillerSpeak({ kind: "tool", toolName: baseName, toolInput: inputStr });
+        }
       }
     } else if (phase === "result" || phase === "end") {
       const card = t.toolCards.get(callId);
@@ -1223,6 +1546,32 @@ function handleAgentEvent(payload) {
         t.container.insertBefore(t.thinkingEl, t.toolsEl);
       } else {
         updateThinkingCard(t.thinkingEl, text);
+      }
+      // Narrate the reasoning out loud. Coalesce rapid deltas into one
+      // Haiku call: append to a buffer, fire either when the buffer crosses
+      // ~200 chars or 1.2s after the last delta, whichever comes first.
+      if (_ttsEnabled && tab === currentTab() && !_ttsRealArrived) {
+        const newPart = text.slice(_fillerLastThinkingLen);
+        if (newPart) {
+          _fillerLastThinkingLen = text.length;
+          _fillerThinkingPending += newPart;
+          const flush = () => {
+            if (!_fillerThinkingPending || _ttsRealArrived) {
+              _fillerThinkingPending = "";
+              return;
+            }
+            const snip = _fillerThinkingPending.slice(0, 800);
+            _fillerThinkingPending = "";
+            fillerSpeak({ kind: "thinking", thinkingText: snip });
+          };
+          clearTimeout(_fillerThinkingTimer);
+          if (_fillerThinkingPending.length >= 200) {
+            _fillerThinkingTimer = null;
+            flush();
+          } else {
+            _fillerThinkingTimer = setTimeout(flush, 1200);
+          }
+        }
       }
     }
   }
@@ -1542,8 +1891,6 @@ async function loadHistory(tab) {
         const assistantText = extractText(content);
         if (isModelSwitchMsg(assistantText)) continue;
         const container = renderAssistantContainer(tab);
-        const ageMs = lastUserTs ? Date.now() - lastUserTs : 0;
-        scheduleMessageHide(container, ageMs);
         const textEl = container.querySelector(".text");
         const toolsEl = container.querySelector(".tools");
         if (Array.isArray(content)) {
@@ -1607,6 +1954,7 @@ async function loadHistory(tab) {
     }
     setPendingForTab(tab, stillPending);
     if (tab === currentTab()) updateSendButton();
+    applyVisibility(tab.paneEl);
 
     if (tab === currentTab()) {
       requestAnimationFrame(() => {
@@ -1699,8 +2047,24 @@ async function onSend() {
   const empty = tab.paneEl.querySelector(".empty");
   if (empty) empty.remove();
 
+  // New turn: clear any in-flight TTS / filler state from the prior turn.
+  ttsReset();
+  // Fire Haiku stall-talk in parallel with the real RPC so the user hears
+  // an ack within ~1s instead of waiting for the main model's first token.
+  // Opening the ack window buffers any real text deltas that arrive before
+  // the ack response — guarantees ack speaks first.
+  if (_ttsEnabled) {
+    openAckWindow();
+    fillerSpeak({
+      kind: "ack",
+      lastUser: text,
+      history: fillerHistorySnapshot(tab, 3),
+    });
+  }
+
   scrollToBottom(true);
   renderUserMessage(text, tab);
+  clawdVid.thinking();
   if (tab.turnCount === 0) autoTitleTab(tab, text).catch(() => {});
   const pendingId = pushPending(tab, text);
   $input.value = "";
@@ -1805,15 +2169,34 @@ document.addEventListener("keydown", (e) => {
 const $btnSpeak = document.getElementById("btnSpeak");
 let _ttsEnabled = localStorage.getItem("clawd.tts") === "1";
 let _ttsSpokenUpTo = 0;     // char count of fullText already enqueued/spoken
+let _ttsTurnFullText = "";  // latest fullText for picking chat variant
 let _ttsIdleTimer = null;
 let _ttsMode = "browser";   // "elevenlabs" | "openai" | "browser"
 let _ttsAudio = null;       // active HTMLAudioElement (openai mode)
 let _ttsTurnId = 0;         // bumped on every reset; in-flight requests check this
 let _ttsChunkIndex = 0;     // 0 = first chunk this turn (lower split threshold)
-let _ttsQueue = [];         // [{ turnId, blobPromise }] played sequentially
+let _ttsQueue = [];         // [{ turnId, blobPromise, kind }] played sequentially
 let _ttsAborts = [];        // active AbortControllers for in-flight /api/tts fetches
 let _ttsDraining = false;   // mutex — only one drain loop active at a time
 let _ttsResolveCurrent = null; // resolves the in-flight playback promise (for reset)
+// Filler / Haiku stall-talk state — see fillerSpeak(). Lives alongside the
+// real-text TTS queue so they share one audio output (no overlap).
+// Ack is special: it's the user's "intro to the thought" and must always play
+// first. We open an "ack window" on user-send and BUFFER real text deltas
+// during it; the window closes when the ack lands (or 2.5s timeout) and
+// buffered real flushes through immediately. Tool/thinking narration is
+// droppable — dies as soon as real arrives.
+let _ttsRealArrived = false;        // first "real" chunk enqueued — drops pending tool/thinking
+let _ttsRealAudioStarted = false;   // first "real" chunk actually started playing
+let _ackWindowOpen = false;         // while true, real ttsFeed() calls are deferred
+let _ackWindowTimer = null;         // timeout that force-closes the window if ack stalls
+let _ackPendingTtsFeed = null;      // latest deferred {fullText, isFinal} call
+let _fillerLastToolId = null;       // last tool callId we've already narrated
+let _fillerLastThinkingLen = 0;     // chars of current thinking stream already consumed
+let _fillerThinkingPending = "";    // not-yet-narrated thinking deltas
+let _fillerThinkingTimer = null;    // debounce timer for thinking narration
+let _fillerInflight = 0;            // # of /api/filler fetches in flight (cap to 1)
+const _ACK_WINDOW_MS = 2500;        // max time real text waits for ack before flushing
 
 function ttsStrip(text) {
   return text
@@ -1835,8 +2218,21 @@ function ttsStrip(text) {
 function ttsReset() {
   _ttsSpokenUpTo = 0;
   _ttsChunkIndex = 0;
+  _ttsTurnFullText = "";
   _ttsTurnId++;             // invalidate every in-flight chunk
   _ttsQueue = [];
+  _ttsRealArrived = false;
+  _ttsRealAudioStarted = false;
+  _ackWindowOpen = false;
+  clearTimeout(_ackWindowTimer);
+  _ackWindowTimer = null;
+  _ackPendingTtsFeed = null;
+  _fillerLastToolId = null;
+  _fillerLastThinkingLen = 0;
+  _fillerThinkingPending = "";
+  _fillerInflight = 0;
+  clearTimeout(_fillerThinkingTimer);
+  _fillerThinkingTimer = null;
   clearTimeout(_ttsIdleTimer);
   speechSynthesis.cancel();
   _ttsAborts.forEach(ac => { try { ac.abort(); } catch {} });
@@ -1872,10 +2268,11 @@ async function ttsFetchChunk(text, turnId) {
   }
 }
 
-function ttsPlayBlob(blob) {
+function ttsPlayBlob(blob, kind) {
   return new Promise(resolve => {
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
+    audio.__kind = kind;
     _ttsAudio = audio;
     let done = false;
     const finish = () => {
@@ -1887,7 +2284,11 @@ function ttsPlayBlob(blob) {
       resolve();
     };
     _ttsResolveCurrent = finish;
-    audio.onplay = () => { clearTimeout(_ttsIdleTimer); clawdVid.chatting(); };
+    audio.onplay = () => {
+      clearTimeout(_ttsIdleTimer);
+      clawdVid.chatting(_ttsTurnFullText);
+      if (kind === "real") _ttsRealAudioStarted = true;
+    };
     audio.onended = finish;
     audio.onerror = finish;
     audio.play().catch(finish);
@@ -1901,10 +2302,17 @@ async function ttsDrainQueue() {
     while (_ttsEnabled && _ttsQueue.length) {
       const item = _ttsQueue.shift();
       if (item.turnId !== _ttsTurnId) continue;
+      // Drop late tool/thinking once the real answer has begun.
+      if ((item.kind === "tool" || item.kind === "thinking") && _ttsRealArrived) continue;
+      // Drop late ack once real audio has actually started playing.
+      if (item.kind === "ack" && _ttsRealAudioStarted) continue;
       let blob = null;
       try { blob = await item.blobPromise; } catch {}
       if (item.turnId !== _ttsTurnId || !_ttsEnabled || !blob) continue;
-      await ttsPlayBlob(blob);
+      // Re-check after async wait.
+      if ((item.kind === "tool" || item.kind === "thinking") && _ttsRealArrived) continue;
+      if (item.kind === "ack" && _ttsRealAudioStarted) continue;
+      await ttsPlayBlob(blob, item.kind);
     }
   } finally {
     _ttsDraining = false;
@@ -1914,13 +2322,159 @@ async function ttsDrainQueue() {
   }
 }
 
-function ttsEnqueue(text) {
+// kind: "real" | "ack" | "tool" | "thinking"
+//   - real:               main model output (default)
+//   - ack:                "intro to the thought" — always plays unless real
+//                         audio has already started; jumps to front of queue.
+//   - tool / thinking:    droppable narration; killed when real arrives.
+// When the first "real" chunk lands, we drop pending tool/thinking from the
+// queue and put a 1.5s grace timer on any currently-playing tool/thinking
+// audio. Ack is exempt — it always plays through.
+function ttsEnqueue(text, kind = "real") {
   const stripped = ttsStrip(text).trim();
   if (!stripped) return;
+  // Late tool/thinking after real arrived → drop.
+  if ((kind === "tool" || kind === "thinking") && _ttsRealArrived) return;
+  // Late ack after real has actually started playing → drop.
+  if (kind === "ack" && _ttsRealAudioStarted) return;
+
   const turnId = _ttsTurnId;
   const blobPromise = ttsFetchChunk(stripped, turnId);
-  _ttsQueue.push({ turnId, blobPromise });
+  const item = { turnId, blobPromise, kind };
+  // Ack jumps to the front so the user hears it before queued real chunks.
+  // (If real audio is already mid-playback, the ack still has to wait for
+  // the current chunk to end — that's intentional, no overlap.)
+  if (kind === "ack") _ttsQueue.unshift(item);
+  else _ttsQueue.push(item);
+
+  if (kind === "real" && !_ttsRealArrived) {
+    _ttsRealArrived = true;
+    // Drop pending tool/thinking; keep ack and real.
+    _ttsQueue = _ttsQueue.filter(it => it.kind === "real" || it.kind === "ack");
+    // Soft-cut tool/thinking mid-playback: give 1.5s grace, then hard-cut.
+    // Ack is exempt — it's short and the user wants to hear it.
+    if (_ttsAudio && (_ttsAudio.__kind === "tool" || _ttsAudio.__kind === "thinking")) {
+      const audio = _ttsAudio;
+      setTimeout(() => {
+        if (_ttsAudio === audio) {
+          try { audio.pause(); } catch {}
+          if (_ttsResolveCurrent) { const r = _ttsResolveCurrent; _ttsResolveCurrent = null; r(); }
+        }
+      }, 1500);
+    }
+  }
   ttsDrainQueue();
+}
+
+// ── Filler / Haiku stall-talk ──────────────────────────────────────────────
+// Calls /api/filler (Bankr → claude-haiku-4.5) for a quick 1-line voice line
+// while the main model is still composing. Three kinds:
+//   - ack:      fired once on user-send. Just acknowledges, never answers.
+//   - tool:     fired on agent.tool start. Narrates what it's about to do.
+//   - thinking: fired (debounced) on agent.thinking deltas. Paraphrases.
+// Skipped silently if real text has already started or another filler is
+// already in flight (we don't want stacking — ack already covers most stalls).
+async function fillerSpeak({ kind, lastUser, toolName, toolInput, thinkingText, history }) {
+  if (!_ttsEnabled) return;
+  if (_ttsMode === "browser") return;  // filler needs the audio pipeline
+  // Entry guards (per-kind):
+  //   - ack:               only blocked if real audio already started playing
+  //   - tool / thinking:   blocked once real has arrived OR another filler is in flight
+  if (kind === "ack") {
+    if (_ttsRealAudioStarted) return;
+  } else {
+    if (_ttsRealArrived) return;
+    if (_fillerInflight > 0) return;
+  }
+  const turnId = _ttsTurnId;
+  _fillerInflight++;
+  const ac = new AbortController();
+  _ttsAborts.push(ac);
+  try {
+    const res = await fetch("/api/filler", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, lastUser, toolName, toolInput, thinkingText, history }),
+      signal: ac.signal,
+    });
+    if (!res.ok) {
+      if (window.__clawdDebug) console.warn("[filler]", kind, "HTTP", res.status);
+      return;
+    }
+    const data = await res.json();
+    if (turnId !== _ttsTurnId || !_ttsEnabled) return;
+    // Exit guards mirror entry guards (state may have advanced during fetch).
+    if (kind === "ack" ? _ttsRealAudioStarted : _ttsRealArrived) return;
+    const text = (data?.text || "").trim();
+    if (!text) return;
+    ttsEnqueue(text, kind);   // kind passes through: "ack" | "tool" | "thinking"
+  } catch (e) {
+    if (e.name !== "AbortError" && window.__clawdDebug) console.warn("[filler]", e.message);
+  } finally {
+    _fillerInflight = Math.max(0, _fillerInflight - 1);
+    const i = _ttsAborts.indexOf(ac);
+    if (i >= 0) _ttsAborts.splice(i, 1);
+    // Always close the ack window when the ack request settles — success,
+    // skip, or error. Buffered real text gets to play.
+    if (kind === "ack") closeAckWindow("ack-settled");
+  }
+}
+
+// Open a brief "ack window" right after the user submits. While it's open,
+// real text deltas are buffered so the ack reliably plays first. Closes
+// when the ack lands (fillerSpeak success), the ack fails, or _ACK_WINDOW_MS
+// elapses — whichever comes first. After close, any buffered ttsFeed call
+// is replayed exactly once with the latest cumulative text.
+function openAckWindow() {
+  _ackWindowOpen = true;
+  clearTimeout(_ackWindowTimer);
+  _ackWindowTimer = setTimeout(() => closeAckWindow("timeout"), _ACK_WINDOW_MS);
+}
+function closeAckWindow(_reason) {
+  if (!_ackWindowOpen) return;
+  _ackWindowOpen = false;
+  clearTimeout(_ackWindowTimer);
+  _ackWindowTimer = null;
+  if (_ackPendingTtsFeed) {
+    const { fullText, isFinal } = _ackPendingTtsFeed;
+    _ackPendingTtsFeed = null;
+    ttsFeed(fullText, isFinal);   // window now closed — falls through to normal path
+  }
+}
+
+// Reading clawd-md/CLAUDE.md files is the assistant looking at its own
+// instructions — i.e. *thinking*, not doing tool work. Don't narrate; just
+// emit a short thinking sound instead so it sounds like silent contemplation.
+const _BRAIN_PATH_RE = /(clawd-md\/|claude\.md$|\/\.claude\/|workspace-clawd\/)/i;
+const _BRAIN_SOUNDS = ["Hmm.", "Hmmm.", "Mmm.", "Hrmm.", "Hm, lemme see.", "Mm-hmm.", "Mmm, okay."];
+function isBrainFileRead(toolName, toolInput) {
+  if (toolName !== "Read") return false;
+  let path = "";
+  try {
+    const obj = typeof toolInput === "string" ? JSON.parse(toolInput) : toolInput;
+    path = obj?.file_path || obj?.path || "";
+  } catch { path = String(toolInput || ""); }
+  return !!path && _BRAIN_PATH_RE.test(path);
+}
+function pickBrainSound() {
+  return _BRAIN_SOUNDS[Math.floor(Math.random() * _BRAIN_SOUNDS.length)];
+}
+
+// Pull the last few user/assistant turns from the DOM as bare text — keeps
+// the Haiku context tight. Each entry: {role, content}.
+function fillerHistorySnapshot(tab, n = 3) {
+  if (!tab || !tab.paneEl) return [];
+  const out = [];
+  const msgs = tab.paneEl.querySelectorAll(".msg.user, .msg.assistant");
+  const take = Math.min(msgs.length, n * 2);
+  for (let i = msgs.length - take; i < msgs.length; i++) {
+    const m = msgs[i];
+    const role = m.classList.contains("user") ? "user" : "assistant";
+    const body = m.querySelector(".text") || m.querySelector(".body");
+    const content = (body?.textContent || "").trim().slice(0, 400);
+    if (content) out.push({ role, content });
+  }
+  return out;
 }
 
 // First chunk: split on any pause (',' ';' ':' '.' '!' '?' '\n') for fast first-audio.
@@ -1932,6 +2486,14 @@ const _TTS_MAX_CHUNK = 240;
 
 function ttsFeed(fullText, isFinal) {
   if (!_ttsEnabled) return;
+  // Hold real text while we're waiting for the ack to land. We only stash
+  // the latest cumulative {fullText, isFinal} — closeAckWindow replays it.
+  if (_ackWindowOpen) {
+    _ackPendingTtsFeed = { fullText, isFinal };
+    _ttsTurnFullText = fullText;   // keep video sync up to date even while deferred
+    return;
+  }
+  _ttsTurnFullText = fullText;
   if (_ttsMode !== "browser") {
     while (true) {
       const newPart = fullText.slice(_ttsSpokenUpTo);
@@ -1967,7 +2529,7 @@ function ttsFeed(fullText, isFinal) {
   function mkUtt(text) {
     const utt = new SpeechSynthesisUtterance(ttsStrip(text));
     utt.rate = 1.25;
-    utt.onstart = () => { clearTimeout(_ttsIdleTimer); clawdVid.chatting(); };
+    utt.onstart = () => { clearTimeout(_ttsIdleTimer); clawdVid.chatting(_ttsTurnFullText); };
     utt.onend   = () => { _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 250); };
     return utt;
   }
@@ -2030,6 +2592,7 @@ function startRecording() {
     _cancelSend = false;
     $btnMic.classList.add("recording");
     $btnMic.title = "Recording… click to cancel";
+    clawdVid.listening();
   };
   r.onresult = (e) => {
     let interim = "";
@@ -2054,6 +2617,7 @@ function startRecording() {
     $btnMic.title = "Voice input";
     _recog = null;
     if (!_cancelSend && $input.value.trim()) onSend();
+    else clawdVid.idle(true);
   };
   _recog = r;
   r.start();

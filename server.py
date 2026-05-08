@@ -164,6 +164,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/autotitle":
             self.handle_autotitle()
+        elif path == "/api/filler":
+            self.handle_filler()
         elif path == "/api/tts":
             self.handle_tts()
         elif path == "/trigger-mic":
@@ -214,6 +216,112 @@ class Handler(BaseHTTPRequestHandler):
             title = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
             title = re.sub(r'["""\'\'.,!?:;]', "", title).strip()[:40]
             self.send_json({"title": title})
+        except Exception as e:
+            self.send_json({"error": str(e)}, status=500)
+
+    def handle_filler(self):
+        """Bankr/Haiku stall-talk while the main model is still answering.
+
+        Three kinds:
+          - "ack":      quick verbal acknowledgement of the user's question
+          - "tool":     casual narration of a tool call
+          - "thinking": paraphrase of the assistant's inner reasoning delta
+        Always answers in <=14 words, first person, no quotes, never answers
+        the user's actual question.
+        """
+        bankr_key = os.environ.get("BANKR_LLM_KEY", "")
+        if not bankr_key:
+            self.send_json({"error": "no bankr key"}, status=503)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            kind = body.get("kind") or "ack"
+            history = body.get("history") or []
+            last_user = (body.get("lastUser") or "").strip()[:600]
+            tool_name = (body.get("toolName") or "").strip()[:60]
+            tool_input = (body.get("toolInput") or "").strip()[:300]
+            thinking_text = (body.get("thinkingText") or "").strip()[:600]
+
+            if kind == "ack":
+                system = (
+                    "You are a stalling voice. A smarter model is about to "
+                    "compose the real answer; your only job is to fill the "
+                    "awkward opening silence so the conversation feels "
+                    "responsive. One short sentence, under 16 words. "
+                    "Show that you HEARD the message and are thinking about "
+                    "it — it's great if you briefly echo the topic in your "
+                    "own casual words. Examples: 'Oh, you're asking about "
+                    "recursion — let me think for a sec.', 'Hmm, the auth "
+                    "refactor, interesting.', 'Right, so a status bar — "
+                    "okay, lemme think.', 'Oh nice, gimme a moment to "
+                    "process that.'. NEVER answer the question. NEVER "
+                    "promise what the answer will be. NEVER say 'I think' "
+                    "followed by a claim. Just acknowledge and stall. "
+                    "First-person, conversational, no quotes, no emojis."
+                )
+                user_msg = (
+                    f"User just said: {last_user}\n\n"
+                    "Reply with ONLY a short stall (under 16 words) that "
+                    "shows you heard them and are thinking. You may briefly "
+                    "echo the topic. Do NOT answer."
+                )
+            elif kind == "tool":
+                system = (
+                    "You narrate, casually and out loud, what an AI assistant "
+                    "is about to do with a tool. One short sentence, under 14 "
+                    "words, first person. No quotes, no emojis."
+                )
+                user_msg = (
+                    f"Tool: {tool_name}\nInput: {tool_input}\n\n"
+                    "Casually narrate in one short sentence what you're "
+                    "about to do. Examples: 'Let me grep for that.', "
+                    "'Pulling up the file now.', 'Running a quick check.'"
+                )
+            else:  # thinking / reasoning
+                system = (
+                    "You paraphrase, casually and out loud, the inner thought "
+                    "of an AI assistant. One short sentence, under 16 words, "
+                    "first person, no quotes."
+                )
+                user_msg = (
+                    f"Inner thought:\n{thinking_text}\n\n"
+                    "Paraphrase the gist out loud in one short sentence."
+                )
+
+            msgs = [{"role": "system", "content": system}]
+            if history:
+                ctx = "\n".join(
+                    f"{m.get('role')}: {(m.get('content') or '')[:300]}"
+                    for m in history[-4:] if m.get("role") and m.get("content")
+                )
+                if ctx:
+                    msgs.append({"role": "user", "content": f"Recent context (for reference, do not respond to it):\n{ctx}"})
+                    msgs.append({"role": "assistant", "content": "Got it."})
+            msgs.append({"role": "user", "content": user_msg})
+
+            req_body = json.dumps({
+                "model": "claude-haiku-4.5",
+                "max_tokens": 80,
+                "messages": msgs,
+            }).encode()
+            req = urllib.request.Request(
+                "https://llm.bankr.bot/v1/chat/completions",
+                data=req_body,
+                headers={"Content-Type": "application/json", "X-API-Key": bankr_key},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+            raw = data["choices"][0]["message"]["content"]
+            import re
+            text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            text = text.strip("\"'`").strip()
+            text = text[:240]
+            self.send_json({"text": text})
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:300]
+            self.send_json({"error": f"upstream {e.code}: {detail}"}, status=502)
         except Exception as e:
             self.send_json({"error": str(e)}, status=500)
 
