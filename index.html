@@ -2288,10 +2288,11 @@ function ttsPlayBlob(blob, kind) {
       clearTimeout(_ttsIdleTimer);
       clawdVid.chatting(_ttsTurnFullText);
       if (kind === "real") _ttsRealAudioStarted = true;
+      if (kind === "ack") ackTrace("audio.onplay fired — ack is speaking");
     };
-    audio.onended = finish;
-    audio.onerror = finish;
-    audio.play().catch(finish);
+    audio.onended = () => { if (kind === "ack") ackTrace("audio.onended for ack"); finish(); };
+    audio.onerror = (e) => { if (kind === "ack") ackTrace("audio.onerror for ack", audio.error); finish(); };
+    audio.play().catch((e) => { if (kind === "ack") ackTrace("audio.play() rejected for ack", e.message); finish(); });
   });
 }
 
@@ -2301,18 +2302,22 @@ async function ttsDrainQueue() {
   try {
     while (_ttsEnabled && _ttsQueue.length) {
       const item = _ttsQueue.shift();
-      if (item.turnId !== _ttsTurnId) continue;
+      if (item.kind === "ack") ackTrace("drain shifted ack", { turnIdMatch: item.turnId === _ttsTurnId, realAudioStarted: _ttsRealAudioStarted });
+      if (item.turnId !== _ttsTurnId) { if (item.kind === "ack") ackTrace("drain DROP ack: turnId mismatch"); continue; }
       // Drop late tool/thinking once the real answer has begun.
       if ((item.kind === "tool" || item.kind === "thinking") && _ttsRealArrived) continue;
       // Drop late ack once real audio has actually started playing.
-      if (item.kind === "ack" && _ttsRealAudioStarted) continue;
+      if (item.kind === "ack" && _ttsRealAudioStarted) { ackTrace("drain DROP ack pre-await: realAudioStarted"); continue; }
       let blob = null;
       try { blob = await item.blobPromise; } catch {}
-      if (item.turnId !== _ttsTurnId || !_ttsEnabled || !blob) continue;
+      if (item.kind === "ack") ackTrace("drain awaited ack blob", blob ? `${blob.size} bytes` : "null");
+      if (item.turnId !== _ttsTurnId || !_ttsEnabled || !blob) { if (item.kind === "ack") ackTrace("drain DROP ack: turnId/disabled/no-blob"); continue; }
       // Re-check after async wait.
       if ((item.kind === "tool" || item.kind === "thinking") && _ttsRealArrived) continue;
-      if (item.kind === "ack" && _ttsRealAudioStarted) continue;
+      if (item.kind === "ack" && _ttsRealAudioStarted) { ackTrace("drain DROP ack post-await: realAudioStarted"); continue; }
+      if (item.kind === "ack") ackTrace("drain calling ttsPlayBlob for ack");
       await ttsPlayBlob(blob, item.kind);
+      if (item.kind === "ack") ackTrace("drain ack playback done");
     }
   } finally {
     _ttsDraining = false;
@@ -2332,14 +2337,19 @@ async function ttsDrainQueue() {
 // audio. Ack is exempt — it always plays through.
 function ttsEnqueue(text, kind = "real") {
   const stripped = ttsStrip(text).trim();
-  if (!stripped) return;
+  if (kind === "ack") ackTrace("ttsEnqueue called", { stripped, realAudioStarted: _ttsRealAudioStarted, ackWindowOpen: _ackWindowOpen });
+  if (!stripped) { if (kind === "ack") ackTrace("DROP: stripped text empty"); return; }
   // Late tool/thinking after real arrived → drop.
   if ((kind === "tool" || kind === "thinking") && _ttsRealArrived) return;
   // Late ack after real has actually started playing → drop.
-  if (kind === "ack" && _ttsRealAudioStarted) return;
+  if (kind === "ack" && _ttsRealAudioStarted) { ackTrace("DROP in ttsEnqueue: realAudioStarted"); return; }
 
   const turnId = _ttsTurnId;
   const blobPromise = ttsFetchChunk(stripped, turnId);
+  if (kind === "ack") {
+    blobPromise.then(b => ackTrace("ack TTS blob arrived", b ? `${b.size} bytes` : "null/aborted"))
+               .catch(e => ackTrace("ack TTS blob fetch failed", e.message));
+  }
   const item = { turnId, blobPromise, kind };
   // Ack jumps to the front so the user hears it before queued real chunks.
   // (If real audio is already mid-playback, the ack still has to wait for
@@ -2374,14 +2384,24 @@ function ttsEnqueue(text, kind = "real") {
 //   - thinking: fired (debounced) on agent.thinking deltas. Paraphrases.
 // Skipped silently if real text has already started or another filler is
 // already in flight (we don't want stacking — ack already covers most stalls).
+// Always-on trace for the ack pipeline so we can see in the console exactly
+// where it's getting dropped. Prefix is searchable: "[clawd-ack]".
+const _ackT0 = () => Date.now();
+let _ackTraceStart = 0;
+function ackTrace(...args) {
+  const dt = _ackTraceStart ? `+${Date.now() - _ackTraceStart}ms` : "0ms";
+  console.log(`%c[clawd-ack ${dt}]`, "color:#ff8855;font-weight:bold", ...args);
+}
+
 async function fillerSpeak({ kind, lastUser, toolName, toolInput, thinkingText, history }) {
-  if (!_ttsEnabled) return;
-  if (_ttsMode === "browser") return;  // filler needs the audio pipeline
+  if (kind === "ack") { _ackTraceStart = Date.now(); ackTrace("fillerSpeak ENTER", { ttsEnabled: _ttsEnabled, ttsMode: _ttsMode, realArrived: _ttsRealArrived, realAudioStarted: _ttsRealAudioStarted, ackWindowOpen: _ackWindowOpen, fillerInflight: _fillerInflight }); }
+  if (!_ttsEnabled) { if (kind === "ack") ackTrace("DROP: tts disabled"); return; }
+  if (_ttsMode === "browser") { if (kind === "ack") ackTrace("DROP: tts mode is browser (no /api/tts pipeline)"); return; }
   // Entry guards (per-kind):
   //   - ack:               only blocked if real audio already started playing
   //   - tool / thinking:   blocked once real has arrived OR another filler is in flight
   if (kind === "ack") {
-    if (_ttsRealAudioStarted) return;
+    if (_ttsRealAudioStarted) { ackTrace("DROP: real audio already started before ack fired"); return; }
   } else {
     if (_ttsRealArrived) return;
     if (_fillerInflight > 0) return;
@@ -2391,32 +2411,45 @@ async function fillerSpeak({ kind, lastUser, toolName, toolInput, thinkingText, 
   const ac = new AbortController();
   _ttsAborts.push(ac);
   try {
+    if (kind === "ack") ackTrace("fetching /api/filler");
     const res = await fetch("/api/filler", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind, lastUser, toolName, toolInput, thinkingText, history }),
       signal: ac.signal,
     });
+    if (kind === "ack") ackTrace("fetch returned", { ok: res.ok, status: res.status });
     if (!res.ok) {
-      if (window.__clawdDebug) console.warn("[filler]", kind, "HTTP", res.status);
+      if (kind === "ack") ackTrace("DROP: HTTP not ok", res.status);
+      else if (window.__clawdDebug) console.warn("[filler]", kind, "HTTP", res.status);
       return;
     }
     const data = await res.json();
-    if (turnId !== _ttsTurnId || !_ttsEnabled) return;
+    if (kind === "ack") ackTrace("response parsed", { text: data?.text, error: data?.error });
+    if (turnId !== _ttsTurnId || !_ttsEnabled) { if (kind === "ack") ackTrace("DROP: turnId mismatch or tts disabled"); return; }
     // Exit guards mirror entry guards (state may have advanced during fetch).
-    if (kind === "ack" ? _ttsRealAudioStarted : _ttsRealArrived) return;
+    if (kind === "ack" ? _ttsRealAudioStarted : _ttsRealArrived) {
+      if (kind === "ack") ackTrace("DROP post-fetch: realAudioStarted=true (real audio began playing during ack fetch)");
+      return;
+    }
     const text = (data?.text || "").trim();
-    if (!text) return;
+    if (!text) { if (kind === "ack") ackTrace("DROP: empty text from /api/filler"); return; }
+    if (kind === "ack") ackTrace("calling ttsEnqueue", text);
     ttsEnqueue(text, kind);   // kind passes through: "ack" | "tool" | "thinking"
+    if (kind === "ack") ackTrace("ttsEnqueue returned, queue length now", _ttsQueue.length);
   } catch (e) {
-    if (e.name !== "AbortError" && window.__clawdDebug) console.warn("[filler]", e.message);
+    if (kind === "ack") ackTrace("DROP: exception", e.name, e.message);
+    else if (e.name !== "AbortError" && window.__clawdDebug) console.warn("[filler]", e.message);
   } finally {
     _fillerInflight = Math.max(0, _fillerInflight - 1);
     const i = _ttsAborts.indexOf(ac);
     if (i >= 0) _ttsAborts.splice(i, 1);
-    // Always close the ack window when the ack request settles — success,
-    // skip, or error. Buffered real text gets to play.
-    if (kind === "ack") closeAckWindow("ack-settled");
+    if (kind === "ack") {
+      // Always close the ack window when the ack request settles — success,
+      // skip, or error. Buffered real text gets to play.
+      ackTrace("calling closeAckWindow from finally");
+      closeAckWindow("ack-settled");
+    }
   }
 }
 
@@ -2428,13 +2461,15 @@ async function fillerSpeak({ kind, lastUser, toolName, toolInput, thinkingText, 
 function openAckWindow() {
   _ackWindowOpen = true;
   clearTimeout(_ackWindowTimer);
-  _ackWindowTimer = setTimeout(() => closeAckWindow("timeout"), _ACK_WINDOW_MS);
+  _ackWindowTimer = setTimeout(() => { ackTrace("ack window TIMEOUT (haiku slower than 2.5s)"); closeAckWindow("timeout"); }, _ACK_WINDOW_MS);
+  ackTrace("openAckWindow");
 }
-function closeAckWindow(_reason) {
+function closeAckWindow(reason) {
   if (!_ackWindowOpen) return;
   _ackWindowOpen = false;
   clearTimeout(_ackWindowTimer);
   _ackWindowTimer = null;
+  ackTrace("closeAckWindow", reason, "pendingTtsFeed:", !!_ackPendingTtsFeed);
   if (_ackPendingTtsFeed) {
     const { fullText, isFinal } = _ackPendingTtsFeed;
     _ackPendingTtsFeed = null;
@@ -2489,6 +2524,7 @@ function ttsFeed(fullText, isFinal) {
   // Hold real text while we're waiting for the ack to land. We only stash
   // the latest cumulative {fullText, isFinal} — closeAckWindow replays it.
   if (_ackWindowOpen) {
+    if (!_ackPendingTtsFeed) ackTrace("ttsFeed: BUFFERING real text (window open)", fullText.slice(0, 60));
     _ackPendingTtsFeed = { fullText, isFinal };
     _ttsTurnFullText = fullText;   // keep video sync up to date even while deferred
     return;
