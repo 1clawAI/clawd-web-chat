@@ -495,6 +495,14 @@ const clawdVid = (() => {
     return CHAT_DEFAULT;
   }
 
+  // Pool used when a chat clip ends mid-TTS — picks a generic talking
+  // variant so the mouth keeps moving. Excludes greeting/satisfied clips
+  // which are reserved for openers via nextChat().
+  const CHAT_LOOP_POOL = [CHAT_DEFAULT, CHAT_SHORT, CHAT_DRUNK, CHAT_EXPLAIN_HANDS, CHAT_EXPLAIN];
+  function nextChatVariant() {
+    return CHAT_LOOP_POOL[Math.floor(Math.random() * CHAT_LOOP_POOL.length)];
+  }
+
   // Wrap each primary video and add an overlay layer for cross-fade.
   const slots = ["clawdVideo", "clawdVideoMin"].map(id => {
     const primary = document.getElementById(id);
@@ -598,7 +606,13 @@ const clawdVid = (() => {
 
   function onEnded() {
     // building/thinking loop, so onEnded won't fire while in those states.
-    if (_chatting) _chatting = false;  // play chatting once, then return to idle
+    // If a chat clip ends while TTS audio is still going, pick a fresh
+    // talking variant so the mouth keeps moving instead of dropping to idle.
+    if (_chatting && (_ttsAudio || _ttsQueue.length > 0)) {
+      play(nextChatVariant());
+      return;
+    }
+    if (_chatting) _chatting = false;
     play(nextIdle());
   }
 
@@ -2693,6 +2707,8 @@ _micEvents.onmessage = (e) => {
     toggleMinimize();
   } else if (e.data === "reveal-history") {
     revealHistory();
+  } else if (e.data === "new-tab") {
+    createTab();
   }
 };
 

@@ -3,6 +3,7 @@
 Global hotkey daemon for clawd-web.
 Ctrl+Option+Cmd+. (or numpad .) anywhere in the OS toggles mic recording.
 Ctrl+Option+Cmd+0 (or numpad 0) toggles the Clawd view (same as clicking the MP4).
+Ctrl+Option+Cmd++ (numpad +) starts a fresh chat tab.
 Ctrl+Option+Cmd+h reveals chat history for 30s before it fades again.
 
 Install dep once:
@@ -44,6 +45,7 @@ def is_cmd(k):  return k in (keyboard.Key.cmd,  keyboard.Key.cmd_l,  keyboard.Ke
 def is_period(k): return (hasattr(k, 'char') and k.char == '.') or k == keyboard.Key.delete
 def is_zero(k):   return (hasattr(k, 'char') and k.char == '0') or (hasattr(k, 'vk') and k.vk == 82)
 def is_h(k):      return hasattr(k, 'char') and k.char == 'h'
+def is_plus(k):   return (hasattr(k, 'char') and k.char == '+') or (hasattr(k, 'vk') and k.vk == 69)  # vk 69 = numpad +
 
 def on_press(key, *_):
     _pressed.add(key)
@@ -60,11 +62,13 @@ def on_press(key, *_):
         post("/trigger-toggle-view", "toggled view")
     elif is_h(key):
         post("/trigger-reveal-history", "revealed history")
+    elif is_plus(key):
+        post("/trigger-new-tab", "new tab")
 
 def on_release(key, *_):
     _pressed.discard(key)
 
-print(f"🎤 clawd hotkey ready — Ctrl+Option+Cmd+. toggles mic, +0 toggles view, +h reveals history (server on port {PORT})")
+print(f"🎤 clawd hotkey ready — Ctrl+Option+Cmd+. toggles mic, +0 toggles view, ++ new tab, +h reveals history (server on port {PORT})")
 
 with keyboard.Listener(on_press=on_press, on_release=on_release) as l:
     l.join()
