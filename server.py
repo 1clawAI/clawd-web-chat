@@ -188,6 +188,11 @@ class Handler(BaseHTTPRequestHandler):
             self.rfile.read(length)
             push_event("new-tab")
             self.send_json({"ok": True})
+        elif path == "/trigger-speech-mode":
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            push_event("toggle-speech-mode")
+            self.send_json({"ok": True})
         else:
             self.send_error(404)
 

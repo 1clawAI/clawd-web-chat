@@ -5,6 +5,7 @@ Ctrl+Option+Cmd+. (or numpad .) anywhere in the OS toggles mic recording.
 Ctrl+Option+Cmd+0 (or numpad 0) toggles the Clawd view (same as clicking the MP4).
 Ctrl+Option+Cmd++ (numpad +) starts a fresh chat tab.
 Ctrl+Option+Cmd+h reveals chat history for 30s before it fades again.
+Ctrl+Option+Cmd+- toggles speech mode (full-black 16:9 stage with subtitles).
 
 Install dep once:
     pip install pynput --break-system-packages
@@ -46,6 +47,7 @@ def is_period(k): return (hasattr(k, 'char') and k.char == '.') or k == keyboard
 def is_zero(k):   return (hasattr(k, 'char') and k.char == '0') or (hasattr(k, 'vk') and k.vk == 82)
 def is_h(k):      return hasattr(k, 'char') and k.char == 'h'
 def is_plus(k):   return (hasattr(k, 'char') and k.char == '+') or (hasattr(k, 'vk') and k.vk == 69)  # vk 69 = numpad +
+def is_minus(k):  return (hasattr(k, 'char') and k.char == '-') or (hasattr(k, 'vk') and k.vk in (27, 78))  # 27 = main -, 78 = numpad -
 
 def on_press(key, *_):
     _pressed.add(key)
@@ -64,11 +66,13 @@ def on_press(key, *_):
         post("/trigger-reveal-history", "revealed history")
     elif is_plus(key):
         post("/trigger-new-tab", "new tab")
+    elif is_minus(key):
+        post("/trigger-speech-mode", "toggled speech mode")
 
 def on_release(key, *_):
     _pressed.discard(key)
 
-print(f"🎤 clawd hotkey ready — Ctrl+Option+Cmd+. toggles mic, +0 toggles view, ++ new tab, +h reveals history (server on port {PORT})")
+print(f"🎤 clawd hotkey ready — Ctrl+Option+Cmd+. toggles mic, +0 toggles view, ++ new tab, +- toggles speech, +h reveals history (server on port {PORT})")
 
 with keyboard.Listener(on_press=on_press, on_release=on_release) as l:
     l.join()

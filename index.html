@@ -78,6 +78,75 @@
   #widget.minimized #bubble { display: flex; }
   #widget.minimized #panel  { display: none; }
 
+  /* ── Speech mode: full-black 16:9 stage with Clawd + subtitles ────────── */
+  #speechMode {
+    display: none;
+    position: fixed; inset: 0;
+    background: #000;
+    z-index: 100000;
+    align-items: center; justify-content: center;
+    pointer-events: auto;
+    cursor: pointer;
+  }
+  #widget.speech #speechMode { display: flex; animation: fadeUp 0.25s ease; }
+  #widget.speech #panel,
+  #widget.speech #bubble { display: none !important; }
+  body:has(#widget.speech) { background: #000 !important; }
+
+  #speechStage {
+    width: min(100vw, calc(100vh * 16 / 9));
+    height: min(100vh, calc(100vw * 9 / 16));
+    position: relative;
+    background: #000;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  #speechVidWrap {
+    height: 100%;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #speechVidWrap .clawd-vid-wrap {
+    height: 100%;
+    width: auto;
+    border-radius: 0;
+  }
+  #speechVidWrap video {
+    height: 100%;
+    width: auto;
+    max-width: 100%;
+    border-radius: 0 !important;
+    display: block;
+    pointer-events: none;
+  }
+  #speechSubtitle {
+    position: absolute;
+    left: 0; right: 0; bottom: 5%;
+    text-align: center;
+    font-family: var(--font-sans);
+    font-size: clamp(32px, 5.5vh, 72px);
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    color: #fff;
+    -webkit-text-stroke: 2px #000;
+    paint-order: stroke fill;
+    text-shadow:
+      0 0 2px #000,
+      0 0 4px #000,
+      0 0 8px rgba(0,0,0,0.95),
+      0 4px 18px rgba(0,0,0,0.95),
+      2px 2px 0 #000,
+      -2px 2px 0 #000,
+      2px -2px 0 #000,
+      -2px -2px 0 #000;
+    padding: 0 5%;
+    line-height: 1.2;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
+    max-height: 35%;
+    overflow: hidden;
+  }
+  #speechSubtitle:empty { opacity: 0; }
+
   #bubbleControls {
     display: flex; align-items: center; gap: 6px;
     padding: 0 2px;
@@ -339,6 +408,16 @@
 
 <div id="widget" class="expanded">
 
+  <!-- Speech mode: full-screen black, 16:9 stage, Clawd + subtitles -->
+  <div id="speechMode">
+    <div id="speechStage">
+      <div id="speechVidWrap">
+        <video id="clawdVideoSpeech" autoplay muted playsinline src="clawdassets/idle_1.mp4"></video>
+      </div>
+      <div id="speechSubtitle"></div>
+    </div>
+  </div>
+
   <!-- Minimized bubble -->
   <div id="bubble">
     <div id="bubbleControls">
@@ -504,7 +583,7 @@ const clawdVid = (() => {
   }
 
   // Wrap each primary video and add an overlay layer for cross-fade.
-  const slots = ["clawdVideo", "clawdVideoMin"].map(id => {
+  const slots = ["clawdVideo", "clawdVideoMin", "clawdVideoSpeech"].map(id => {
     const primary = document.getElementById(id);
     const wrap = document.createElement("div");
     wrap.className = "clawd-vid-wrap";
@@ -2181,7 +2260,29 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     createTab();
   }
+  // Ctrl+Alt+Cmd+- toggles speech mode. Use e.code so Option-mangled chars
+  // (e.g. "–" en-dash on Mac) still match.
+  if (e.code === "Minus" && e.ctrlKey && e.altKey && e.metaKey) {
+    e.preventDefault();
+    toggleSpeechMode();
+  }
 });
+
+// ── Speech mode ────────────────────────────────────────────────────────────
+const $speechSubtitle = document.getElementById("speechSubtitle");
+function setSubtitle(text) {
+  if (!$speechSubtitle) return;
+  $speechSubtitle.textContent = text || "";
+}
+function toggleSpeechMode() {
+  const on = $widget.classList.toggle("speech");
+  localStorage.setItem("clawd.speech", on ? "1" : "0");
+  if (!on) setSubtitle("");
+}
+if (localStorage.getItem("clawd.speech") === "1") {
+  $widget.classList.add("speech");
+}
+document.getElementById("speechMode").addEventListener("click", toggleSpeechMode);
 
 // ── Text-to-speech ─────────────────────────────────────────────────────────
 const $btnSpeak = document.getElementById("btnSpeak");
@@ -2262,6 +2363,7 @@ function ttsReset() {
   }
   // Unblock any drain loop awaiting the (now-stopped) audio.
   if (_ttsResolveCurrent) { const r = _ttsResolveCurrent; _ttsResolveCurrent = null; r(); }
+  setSubtitle("");
 }
 
 async function ttsFetchChunk(text, turnId) {
@@ -2286,7 +2388,7 @@ async function ttsFetchChunk(text, turnId) {
   }
 }
 
-function ttsPlayBlob(blob, kind) {
+function ttsPlayBlob(blob, kind, subtitleText) {
   return new Promise(resolve => {
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
@@ -2307,6 +2409,7 @@ function ttsPlayBlob(blob, kind) {
       clawdVid.chatting(_ttsTurnFullText);
       if (kind === "real") _ttsRealAudioStarted = true;
       if (kind === "ack") ackTrace("audio.onplay fired — ack is speaking");
+      if (subtitleText) setSubtitle(subtitleText);
     };
     audio.onended = () => { if (kind === "ack") ackTrace("audio.onended for ack"); finish(); };
     audio.onerror = (e) => { if (kind === "ack") ackTrace("audio.onerror for ack", audio.error); finish(); };
@@ -2334,7 +2437,7 @@ async function ttsDrainQueue() {
       if ((item.kind === "tool" || item.kind === "thinking") && _ttsRealArrived) continue;
       if (item.kind === "ack" && _ttsRealAudioStarted) { ackTrace("drain DROP ack post-await: realAudioStarted"); continue; }
       if (item.kind === "ack") ackTrace("drain calling ttsPlayBlob for ack");
-      await ttsPlayBlob(blob, item.kind);
+      await ttsPlayBlob(blob, item.kind, item.text);
       if (item.kind === "ack") ackTrace("drain ack playback done");
     }
   } finally {
@@ -2342,6 +2445,7 @@ async function ttsDrainQueue() {
   }
   if (!_ttsAudio && !_ttsQueue.length) {
     _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 250);
+    setSubtitle("");
   }
 }
 
@@ -2368,7 +2472,7 @@ function ttsEnqueue(text, kind = "real") {
     blobPromise.then(b => ackTrace("ack TTS blob arrived", b ? `${b.size} bytes` : "null/aborted"))
                .catch(e => ackTrace("ack TTS blob fetch failed", e.message));
   }
-  const item = { turnId, blobPromise, kind };
+  const item = { turnId, blobPromise, kind, text: stripped };
   // Ack jumps to the front so the user hears it before queued real chunks.
   // (If real audio is already mid-playback, the ack still has to wait for
   // the current chunk to end — that's intentional, no overlap.)
@@ -2592,10 +2696,11 @@ function ttsFeed(fullText, isFinal) {
   const newPart = fullText.slice(_ttsSpokenUpTo);
   if (!newPart) return;
   function mkUtt(text) {
-    const utt = new SpeechSynthesisUtterance(ttsStrip(text));
+    const stripped = ttsStrip(text);
+    const utt = new SpeechSynthesisUtterance(stripped);
     utt.rate = 1.25;
-    utt.onstart = () => { clearTimeout(_ttsIdleTimer); clawdVid.chatting(_ttsTurnFullText); };
-    utt.onend   = () => { _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 250); };
+    utt.onstart = () => { clearTimeout(_ttsIdleTimer); clawdVid.chatting(_ttsTurnFullText); setSubtitle(stripped); };
+    utt.onend   = () => { _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 250); setSubtitle(""); };
     return utt;
   }
   if (isFinal) {
@@ -2709,6 +2814,8 @@ _micEvents.onmessage = (e) => {
     revealHistory();
   } else if (e.data === "new-tab") {
     createTab();
+  } else if (e.data === "toggle-speech-mode") {
+    toggleSpeechMode();
   }
 };
 
