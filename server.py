@@ -104,6 +104,124 @@ TTS_INSTRUCTIONS = (
 
 
 PORT = int(os.environ.get("PORT", "7800"))
+MODES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modes")
+
+
+def list_modes():
+    """Return [{slug, name, content}] for every .md file in modes/.
+
+    `slug` is the filename without .md, `name` is the same string with hyphens
+    swapped for spaces (display label), `content` is the raw markdown.
+    Read at request time so edits to .md files take effect without a restart.
+    """
+    out = []
+    if not os.path.isdir(MODES_DIR):
+        return out
+    for name in sorted(os.listdir(MODES_DIR)):
+        if not name.endswith(".md") or name.startswith("."):
+            continue
+        slug = name[:-3]
+        try:
+            with open(os.path.join(MODES_DIR, name), "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            continue
+        out.append({"slug": slug, "name": slug.replace("-", " "), "content": content})
+    return out
+
+
+def _llm_chat_with_fallback(messages, max_tokens, bankr_model, venice_model,
+                            anthropic_model, timeout=15, temperature=None):
+    """Three-tier cascade: bankr → venice → anthropic-direct.
+
+    Returns the assistant's raw content string. Each tier is skipped if its
+    key isn't set. When a later tier is available, the earlier tier's timeout
+    is capped so a hung provider can't burn the whole budget. Raises the last
+    upstream exception if every available tier fails (or RuntimeError if none
+    are configured).
+    """
+    bankr_key = os.environ.get("BANKR_LLM_KEY", "")
+    venice_key = os.environ.get("VENICE_API_KEY", "")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    last_err = None
+
+    if bankr_key:
+        try:
+            body_obj = {
+                "model": bankr_model,
+                "max_tokens": max_tokens,
+                "messages": messages,
+            }
+            if temperature is not None:
+                body_obj["temperature"] = temperature
+            body = json.dumps(body_obj).encode()
+            req = urllib.request.Request(
+                "https://llm.bankr.bot/v1/chat/completions",
+                data=body,
+                headers={"Content-Type": "application/json", "X-API-Key": bankr_key},
+                method="POST",
+            )
+            bt = min(5, timeout) if (venice_key or anthropic_key) else timeout
+            with urllib.request.urlopen(req, timeout=bt) as resp:
+                return json.loads(resp.read())["choices"][0]["message"]["content"]
+        except Exception as e:
+            last_err = e
+
+    if venice_key:
+        try:
+            body_obj = {
+                "model": venice_model,
+                "max_tokens": max_tokens,
+                "messages": messages,
+            }
+            if temperature is not None:
+                body_obj["temperature"] = temperature
+            body = json.dumps(body_obj).encode()
+            req = urllib.request.Request(
+                "https://api.venice.ai/api/v1/chat/completions",
+                data=body,
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {venice_key}"},
+                method="POST",
+            )
+            vt = min(8, timeout) if anthropic_key else timeout
+            with urllib.request.urlopen(req, timeout=vt) as resp:
+                return json.loads(resp.read())["choices"][0]["message"]["content"]
+        except Exception as e:
+            last_err = e
+
+    if anthropic_key:
+        # Anthropic-messages API splits the system prompt out of `messages`.
+        sys_parts = [m.get("content", "") for m in messages if m.get("role") == "system"]
+        rest = [m for m in messages if m.get("role") != "system"]
+        payload = {
+            "model": anthropic_model,
+            "max_tokens": max_tokens,
+            "messages": rest,
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if sys_parts:
+            payload["system"] = "\n\n".join(p for p in sys_parts if p)
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": anthropic_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    return block.get("text", "")
+            return ""
+
+    raise last_err or RuntimeError(
+        "no LLM provider configured (BANKR_LLM_KEY / VENICE_API_KEY / ANTHROPIC_API_KEY)"
+    )
 
 
 # ── HTTP server ──────────────────────────────────────────────────────────────
@@ -121,6 +239,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(cfg)
         elif path == "/health":
             self.send_json({"status": "ok"})
+        elif path == "/api/modes":
+            self.send_json({"modes": list_modes()})
         elif path == "/events":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -193,34 +313,34 @@ class Handler(BaseHTTPRequestHandler):
             self.rfile.read(length)
             push_event("toggle-speech-mode")
             self.send_json({"ok": True})
+        elif path == "/trigger-stop-talking":
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            push_event("stop-talking")
+            self.send_json({"ok": True})
         else:
             self.send_error(404)
 
     def handle_autotitle(self):
-        bankr_key = os.environ.get("BANKR_LLM_KEY", "")
-        if not bankr_key:
-            self.send_json({"error": "no bankr key"}, status=503)
+        if not (os.environ.get("BANKR_LLM_KEY") or os.environ.get("VENICE_API_KEY")
+                or os.environ.get("ANTHROPIC_API_KEY")):
+            self.send_json({"error": "no LLM provider configured"}, status=503)
             return
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
             messages = body.get("messages", [])
-            req_body = json.dumps({
-                "model": "minimax-m2.7",
-                "max_tokens": 200,
-                "messages": [
-                    {"role": "system", "content": "You generate ultra-short chat tab titles. Reply with ONLY 2-3 words, no punctuation, no explanation, no thinking."},
-                ] + messages,
-            }).encode()
-            req = urllib.request.Request(
-                "https://llm.bankr.bot/v1/chat/completions",
-                data=req_body,
-                headers={"Content-Type": "application/json", "X-API-Key": bankr_key},
-                method="POST",
+            full_messages = [
+                {"role": "system", "content": "You generate ultra-short chat tab titles. Reply with ONLY 2-3 words, no punctuation, no explanation, no thinking."},
+            ] + messages
+            raw = _llm_chat_with_fallback(
+                full_messages,
+                max_tokens=200,
+                bankr_model="minimax-m2.7",
+                venice_model="minimax-m27",
+                anthropic_model="claude-haiku-4-5",
+                timeout=15,
             )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read())
-            raw = data["choices"][0]["message"]["content"]
             # strip <think>...</think> reasoning blocks
             import re
             title = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
@@ -239,9 +359,9 @@ class Handler(BaseHTTPRequestHandler):
         Always answers in <=14 words, first person, no quotes, never answers
         the user's actual question.
         """
-        bankr_key = os.environ.get("BANKR_LLM_KEY", "")
-        if not bankr_key:
-            self.send_json({"error": "no bankr key"}, status=503)
+        if not (os.environ.get("BANKR_LLM_KEY") or os.environ.get("VENICE_API_KEY")
+                or os.environ.get("ANTHROPIC_API_KEY")):
+            self.send_json({"error": "no LLM provider configured"}, status=503)
             return
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -255,42 +375,47 @@ class Handler(BaseHTTPRequestHandler):
 
             if kind == "ack":
                 system = (
-                    "You produce generic 'I'm thinking' filler — a placeholder "
-                    "noise played out loud while a smarter model composes "
-                    "the real reply. One short phrase, under 8 words. "
-                    "\n\n"
-                    "Hard rules — every one of these matters:\n"
-                    "  - Do NOT respond to the user's message.\n"
-                    "  - Do NOT reference the topic, subject, or any words "
-                    "from their message.\n"
-                    "  - Do NOT use sentiment words like 'interesting', "
-                    "'great', 'nice', 'cool', 'enjoy', 'fun', 'good'.\n"
-                    "  - Do NOT echo greetings, thanks, or pleasantries.\n"
-                    "  - Do NOT promise what the answer will be.\n"
-                    "  - Do NOT say 'I think' or anything followed by a "
-                    "claim.\n"
+                    "You are a voice filling dead air out loud while a "
+                    "smarter model composes the real answer. Your ONLY job "
+                    "is to make a natural human stall noise so the silence "
+                    "isn't awkward. You are NOT answering anything.\n"
                     "\n"
-                    "Pick something topic-neutral that just signals "
-                    "'processing'. Vary phrasing across calls. "
-                    "Good examples (these are the WHOLE response):\n"
-                    "  'Hmm, lemme think.'\n"
-                    "  'Okay, gimme a sec.'\n"
-                    "  'Mmm, hold on.'\n"
-                    "  'Right, one moment.'\n"
-                    "  'Hmm, alright.'\n"
-                    "  'Lemme work on that.'\n"
-                    "  'Mmm, processing.'\n"
-                    "  'Hmm, okay.'\n"
+                    "Pull from a WIDE variety and keep it fresh every time. "
+                    "Range from a single sound to a short phrase — lean "
+                    "short. Mix these registers:\n"
+                    "  - bare sounds: 'Hmm.' 'Mmm.' 'Uhh...' 'Hmmm.' "
+                    "'Okay.' 'Ummm.' 'Huh.' 'Right.' 'Ah.' 'Welp.'\n"
+                    "  - tiny phrases: 'Let me think.' 'Gimme a sec.' "
+                    "'Lemme check.' 'One moment.' 'Hold on.' 'Let me look.' "
+                    "'Hang on a sec.' 'Lemme dig in.' 'Working on it.' "
+                    "'Okay, thinking.' 'Hmm, lemme see.' 'Alright, gimme a "
+                    "moment.' 'Let me pull that up.' 'Checking now.'\n"
+                    "  - when the request clearly feels big, heavy, or "
+                    "tricky, you MAY acknowledge its WEIGHT (never its "
+                    "content): 'Oh, that's a heavy one — let me think on "
+                    "that.' 'Big question. Gimme a sec.' 'Ooh, tricky one.' "
+                    "'That's a good one, lemme sit with it.' 'Hmm, deep "
+                    "one.'\n"
                     "\n"
-                    "First-person, casual, no quotes, no emojis. The "
-                    "user's message is provided ONLY so you don't say "
-                    "something jarring — never quote from it."
+                    "Hard rules:\n"
+                    "  - NEVER answer, hint at, or begin to address the "
+                    "request. No facts, no opinions, no claims.\n"
+                    "  - NEVER reference the actual topic or repeat words "
+                    "from their message. Commenting that it's 'big' or "
+                    "'tricky' is fine; naming the subject is not.\n"
+                    "  - NEVER echo greetings, thanks, or pleasantries.\n"
+                    "  - NEVER promise what the answer will be.\n"
+                    "\n"
+                    "First-person, casual, spoken-aloud. No quotes, no "
+                    "emojis. Output ONLY the filler itself."
                 )
                 user_msg = (
-                    f"User's message (DO NOT respond to it, DO NOT echo it):\n"
-                    f"{last_user}\n\n"
-                    "Output ONE short generic 'thinking' phrase, under 8 "
-                    "words. No topic reference. No sentiment. Just stall."
+                    f"User's message (for gauging weight ONLY — DO NOT "
+                    f"respond to it, DO NOT echo it):\n{last_user}\n\n"
+                    "Give ONE fresh stall noise. Vary it — could be a single "
+                    "sound, could be a few words. If the request feels big "
+                    "or tricky, you may nod to that weight, but never touch "
+                    "the topic itself."
                 )
             elif kind == "tool":
                 system = (
@@ -326,20 +451,17 @@ class Handler(BaseHTTPRequestHandler):
                     msgs.append({"role": "assistant", "content": "Got it."})
             msgs.append({"role": "user", "content": user_msg})
 
-            req_body = json.dumps({
-                "model": "claude-haiku-4.5",
-                "max_tokens": 80,
-                "messages": msgs,
-            }).encode()
-            req = urllib.request.Request(
-                "https://llm.bankr.bot/v1/chat/completions",
-                data=req_body,
-                headers={"Content-Type": "application/json", "X-API-Key": bankr_key},
-                method="POST",
+            raw = _llm_chat_with_fallback(
+                msgs,
+                max_tokens=80,
+                bankr_model="claude-haiku-4.5",
+                venice_model="claude-sonnet-4-6",
+                anthropic_model="claude-haiku-4-5",
+                timeout=10,
+                # High temp on the ack only — its whole value is sounding
+                # fresh and varied each time, not correct.
+                temperature=(1.0 if kind == "ack" else None),
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read())
-            raw = data["choices"][0]["message"]["content"]
             import re
             text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
             text = text.strip("\"'`").strip()

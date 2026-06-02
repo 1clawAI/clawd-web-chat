@@ -120,7 +120,7 @@
   }
   #speechSubtitle {
     position: absolute;
-    left: 0; right: 0; bottom: 5%;
+    left: 0; right: 0; bottom: 2%;
     text-align: center;
     font-family: var(--font-sans);
     font-size: clamp(32px, 5.5vh, 72px);
@@ -146,6 +146,44 @@
     overflow: hidden;
   }
   #speechSubtitle:empty { opacity: 0; }
+
+  /* HUD icons (status + listening) in speech mode */
+  #speechHud {
+    position: absolute;
+    top: 24px; right: 28px;
+    display: flex; align-items: center; gap: 16px;
+    font-size: 28px; line-height: 1;
+    pointer-events: none;
+    z-index: 3;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.9);
+  }
+  #speechHud > span {
+    opacity: 0.18;
+    transition: opacity 0.2s ease;
+    filter: grayscale(0.7);
+  }
+  #widget.speech.rec  #speechMicIcon  { opacity: 1; filter: none; animation: pulse 1s infinite; }
+  #widget.speech.busy #speechBusyIcon { opacity: 1; filter: none; animation: pulse 1.5s infinite; }
+
+  /* Inline composer in speech mode */
+  #speechComposer {
+    position: fixed;
+    left: 8%; right: 8%; bottom: 12px;
+    display: flex; gap: 10px; align-items: center;
+    pointer-events: auto;
+    z-index: 100001;
+  }
+  #speechInput {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: #fff;
+    padding: 4px 0;
+    font: inherit; font-size: 18px;
+    outline: none;
+  }
+  #speechInput::placeholder { color: transparent; }
+  #speechSendBtn { display: none; }
 
   #bubbleControls {
     display: flex; align-items: center; gap: 6px;
@@ -357,7 +395,7 @@
   #controlsRow {
     display: flex; align-items: center; gap: 8px;
   }
-  #modelPicker {
+  #modelPicker, #modePicker {
     flex: 1;
     padding: 5px 22px 5px 8px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--bg2); color: var(--fg3);
@@ -366,8 +404,10 @@
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'><path fill='%23663333' d='M0 0l4 5 4-5z'/></svg>");
     background-repeat: no-repeat; background-position: right 8px center;
   }
-  #modelPicker:focus { outline: 1px solid var(--accent); }
-  #modelPicker:disabled { opacity: 0.4; cursor: not-allowed; }
+  #modelPicker:focus, #modePicker:focus { outline: 1px solid var(--accent); }
+  #modelPicker:disabled, #modePicker:disabled { opacity: 0.4; cursor: not-allowed; }
+  #modePicker { max-width: 130px; }
+  #modePicker.has-mode { color: var(--fg); border-color: var(--accent); }
   #btnMic { font-size: 18px; }
   #btnMic.recording { color: var(--bad); animation: pulse 1s infinite; }
   #btnSpeak { font-size: 18px; }
@@ -414,7 +454,15 @@
       <div id="speechVidWrap">
         <video id="clawdVideoSpeech" autoplay muted playsinline src="clawdassets/idle_1.mp4"></video>
       </div>
+      <div id="speechHud">
+        <span id="speechBusyIcon" title="Working…">💭</span>
+        <span id="speechMicIcon" title="Listening">🎤</span>
+      </div>
       <div id="speechSubtitle"></div>
+      <form id="speechComposer" onsubmit="event.preventDefault(); speechSend();">
+        <input id="speechInput" type="text" autocomplete="off" />
+        <button id="speechSendBtn" type="submit" title="Send" aria-hidden="true" tabindex="-1">↑</button>
+      </form>
     </div>
   </div>
 
@@ -458,6 +506,7 @@
           <button class="sb-btn" type="button" id="btnSettings" title="Settings">⚙</button>
           <span id="statusDot" class="connecting" title="connecting…"></span>
           <select id="modelPicker" aria-label="Model">
+            <option value="ollama/minimax-m3:cloud">MiniMax M3 · cloud</option>
             <option value="bankr/minimax-m2.7">MiniMax 2.7 · $0.30/$1.20</option>
             <option value="bankr/kimi-k2.6">Kimi K2.6 · $0.95/$4</option>
             <option value="bankr/claude-haiku-4.5">Haiku · $1/$5</option>
@@ -465,7 +514,11 @@
             <option value="bankr/claude-sonnet-4.6">Sonnet · $3/$15</option>
             <option value="bankr/claude-opus-4.6">Opus · $5/$25</option>
           </select>
+          <select id="modePicker" aria-label="Mode" title="Prepended to your first message in this tab">
+            <option value="">no mode</option>
+          </select>
           <button class="sb-btn" type="button" id="btnSpeak" title="TTS off — click to enable">🔇</button>
+          <button class="sb-btn" type="button" id="btnStopTalk" title="Stop talking now (Ctrl+Option+Cmd+Delete)">🤫</button>
           <button class="sb-btn" type="button" id="btnMic" title="Voice input">🎤</button>
           <button id="btnSend" type="submit">↑</button>
         </div>
@@ -802,7 +855,30 @@ window.__eventLog = [];
   window.WebSocket = TappedWS;
 })();
 
-const DEFAULT_MODEL = "bankr/claude-sonnet-4.6";
+// Default flipped to anthropic-1m direct on 2026-05-22 because bankr is
+// returning 500 Authentication errors after 90+ second hangs. Revert to
+// "bankr/claude-sonnet-4.6" once bankr is healthy again.
+const DEFAULT_MODEL = "anthropic-1m/claude-sonnet-4-6";
+
+// Cascade: if the picked model fails to deliver a first token within
+// FIRST_TOKEN_TIMEOUT_MS, or errors, retry the same message on the next tier.
+// Bankr is free but flaky → venice (anonymized Claude) is cheap → anthropic
+// direct is the never-fails floor (most expensive). Total budget for the user
+// to wait: FIRST_TOKEN_TIMEOUT_MS × number of tiers.
+const CASCADE_FLOOR = "anthropic-1m/claude-sonnet-4-6";
+const CASCADE_VENICE = "venice/claude-sonnet-4-6";
+const FIRST_TOKEN_TIMEOUT_MS = 8000;
+function cascadeChain(startModel) {
+  // Hard-coded preferred chain. Then dedupe so we don't try the same provider
+  // twice if DEFAULT_MODEL/picked model already IS one of the lower tiers.
+  const BANKR_SONNET = "bankr/claude-sonnet-4.6";
+  const preferred = [BANKR_SONNET, CASCADE_VENICE, CASCADE_FLOOR];
+  // Figure out the index of startModel in the chain; everything before it is skipped.
+  const i = preferred.indexOf(startModel);
+  let chain = i >= 0 ? preferred.slice(i) : [startModel, CASCADE_FLOOR];
+  // Dedupe while preserving order.
+  return [...new Set(chain)];
+}
 
 const state = {
   ws: null,
@@ -862,8 +938,14 @@ document.getElementById("bubbleNewTab").addEventListener("click", () => createTa
 
 const $bubble = document.getElementById("bubble");
 setInterval(() => {
-  $bubble.classList.toggle("rec", !!_recording);
-  $bubble.classList.toggle("busy", state.tabs.some(t => t.activeRunId));
+  const rec = !!_recording;
+  const busy = state.tabs.some(t => t.activeRunId);
+  $bubble.classList.toggle("rec", rec);
+  $bubble.classList.toggle("busy", busy);
+  $widget.classList.toggle("rec", rec);
+  $widget.classList.toggle("busy", busy);
+  const sBtn = document.getElementById("speechSendBtn");
+  if (sBtn) sBtn.classList.toggle("stop", busy);
 }, 250);
 
 function autosize($el) {
@@ -979,13 +1061,15 @@ function extractText(content) {
 }
 
 // ── Tab model ──────────────────────────────────────────────────────────────
-function makeTab({ id, sessionKey, displayName, selectedModel, lastSentModel, scrollTop }) {
+function makeTab({ id, sessionKey, displayName, selectedModel, lastSentModel, selectedMode, scrollTop }) {
   const pane = document.createElement("div");
   pane.className = "transcript-pane";
   return {
     id, sessionKey, displayName,
     selectedModel: selectedModel || DEFAULT_MODEL,
     lastSentModel: lastSentModel || null,
+    selectedMode: selectedMode || "",
+    modeApplied: false,
     activeRunId: null,
     runs: new Map(),
     runCompletions: new Map(),
@@ -996,6 +1080,10 @@ function makeTab({ id, sessionKey, displayName, selectedModel, lastSentModel, sc
     scrollTop: typeof scrollTop === "number" ? scrollTop : 0,
     turnCount: 0,
     silentRuns: new Set(),
+    // Cascade: runs awaiting their first token. Map<runId, {resolve, reject}>.
+    // Populated by sendWithCascade, drained by handleChatEvent on first delta
+    // or by handleChatEvent on error/aborted (which then suppresses UI render).
+    runFirstDelta: new Map(),
     // Event buffering — while loading history, queue events to replay AFTER
     // so they render in the right order and don't get wiped by the pane clear.
     loadingHistory: false,
@@ -1016,6 +1104,7 @@ function saveTabs() {
     displayName: t.displayName,
     selectedModel: t.selectedModel,
     lastSentModel: t.lastSentModel,
+    selectedMode: t.selectedMode || "",
     scrollTop: t.scrollTop || 0,
   }))));
   if (state.activeTabId) localStorage.setItem("clawd.activeTab", state.activeTabId);
@@ -1027,6 +1116,50 @@ function loadTabsFromStorage() {
     return arr.filter(t => t && t.id && t.sessionKey).map(makeTab);
   } catch { return null; }
 }
+// ── Modes ──────────────────────────────────────────────────────────────────
+// Modes are .md files in modes/ served by the Python server. Selecting a mode
+// in a fresh tab prepends the file content (wrapped in a <mode> block) to
+// your first message. Picker locks after the first message is sent.
+state.modes = [];     // [{ slug, name, content }]
+state.modesById = {}; // slug -> mode object
+
+async function loadModes() {
+  try {
+    const res = await fetch("/api/modes");
+    const data = await res.json();
+    state.modes = Array.isArray(data?.modes) ? data.modes : [];
+    state.modesById = Object.fromEntries(state.modes.map(m => [m.slug, m]));
+  } catch (e) {
+    console.warn("[modes] load failed", e);
+    state.modes = [];
+    state.modesById = {};
+  }
+  populateModePicker();
+}
+
+function populateModePicker() {
+  const sel = document.getElementById("modePicker");
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">no mode</option>' +
+    state.modes.map(m => `<option value="${m.slug}">${m.name}</option>`).join("");
+  // Restore current selection if still present
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  syncModePicker(currentTab());
+}
+
+function syncModePicker(t) {
+  const sel = document.getElementById("modePicker");
+  if (!sel) return;
+  if (!t) { sel.value = ""; sel.disabled = true; sel.classList.remove("has-mode"); return; }
+  const v = t.selectedMode || "";
+  // If the saved mode slug isn't in the list (file deleted), fall back to none.
+  if (v && !state.modesById[v]) { t.selectedMode = ""; }
+  sel.value = t.selectedMode || "";
+  sel.disabled = !!t.modeApplied || (t.turnCount || 0) > 0;
+  sel.classList.toggle("has-mode", !!t.selectedMode);
+}
+
 function nextTabName() {
   const used = new Set(state.tabs.map(t => t.displayName));
   for (let i = 1; i < 1000; i++) {
@@ -1036,13 +1169,14 @@ function nextTabName() {
   return "new chat " + Date.now();
 }
 
-async function createTab({ displayName, sessionKey, selectedModel, switchTo = true } = {}) {
+async function createTab({ displayName, sessionKey, selectedModel, selectedMode, switchTo = true } = {}) {
   const id = "ui-" + shortHex(6);
   const tab = makeTab({
     id,
     sessionKey: sessionKey || ("agent:clawd:tab-" + shortHex(8)),
     displayName: displayName || nextTabName(),
     selectedModel: selectedModel || (currentTab()?.selectedModel || DEFAULT_MODEL),
+    selectedMode: selectedMode !== undefined ? selectedMode : (currentTab()?.selectedMode || ""),
   });
   state.tabs.push(tab);
   $transcript.appendChild(tab.paneEl);
@@ -1063,6 +1197,7 @@ async function switchTab(id) {
     if ([...sel.options].some(o => o.value === t.selectedModel)) sel.value = t.selectedModel;
     else { sel.value = DEFAULT_MODEL; t.selectedModel = DEFAULT_MODEL; }
   }
+  syncModePicker(t);
   ttsReset();
   // Restore draft for this tab
   $input.value = loadDraft(t);
@@ -1505,17 +1640,42 @@ function handleChatEvent(payload) {
   if (tab.silentRuns.has(runId)) {
     if (chatState === "final" || chatState === "aborted" || chatState === "error") {
       tab.silentRuns.delete(runId);
-      tab.activeRunId = null;
+      // Don't clobber a freshly-started run's id — type-to-interrupt may have
+      // already kicked off a new run while this old one was still finishing.
+      if (tab.activeRunId === runId) tab.activeRunId = null;
       removePendingByRunId(tab, runId);
       resolveTabRunCompletion(tab, runId, chatState === "final" ? null : chatState);
+      // Cascade cleanup: if agent events had already created a turn for this
+      // silently-aborted run, tear it down so we don't leave a ticking ghost
+      // card behind ("responding · 37s" forever).
+      const ghost = tab.runs.get(runId);
+      if (ghost) {
+        if (ghost.tickerId) clearInterval(ghost.tickerId);
+        try { ghost.container?.remove(); } catch {}
+        tab.runs.delete(runId);
+      }
       if (tab === currentTab()) updateSendButton();
     }
+    return;
+  }
+
+  // Cascade hook: if this run is mid-cascade (pre-first-token) and errors or
+  // aborts, reject the waiter and skip ALL rendering — sendWithCascade will
+  // retry on the next tier. The pending bubble is detached from runId by
+  // the cascade before aborting, so removePendingByRunId here is a no-op.
+  if ((chatState === "error" || chatState === "aborted") && tab.runFirstDelta?.has(runId)) {
+    const fd = tab.runFirstDelta.get(runId);
+    tab.runFirstDelta.delete(runId);
+    tab.activeRunId = null;
+    fd.reject(new Error(errorMessage || chatState));
     return;
   }
 
   const t = ensureTurn(runId, tab);
 
   if (chatState === "delta" || chatState === "final") {
+    // Cascade: any chat activity (text/thinking/tool delta) counts as life.
+    markRunAlive(tab, runId);
     if (message) {
       const text = extractText(message.content);
       if (text) {
@@ -1551,7 +1711,7 @@ function handleChatEvent(payload) {
   if (chatState === "final") {
     if (t.tickerId) clearInterval(t.tickerId);
     t.footerEl.innerHTML = "";
-    tab.activeRunId = null;
+    if (tab.activeRunId === runId) tab.activeRunId = null;
     removePendingByRunId(tab, runId);
     resolveTabRunCompletion(tab, runId, null);
     tab.turnCount = (tab.turnCount || 0) + 1;
@@ -1569,13 +1729,13 @@ function handleChatEvent(payload) {
   } else if (chatState === "aborted") {
     if (t.tickerId) clearInterval(t.tickerId);
     t.footerEl.innerHTML = `<div style="color:var(--warn); font-size:12px">⏹ aborted</div>`;
-    tab.activeRunId = null;
+    if (tab.activeRunId === runId) tab.activeRunId = null;
     removePendingByRunId(tab, runId);
     resolveTabRunCompletion(tab, runId, "aborted");
   } else if (chatState === "error") {
     if (t.tickerId) clearInterval(t.tickerId);
     t.footerEl.innerHTML = `<div style="color:var(--bad); font-size:12px">⚠ ${errorMessage || "error"}</div>`;
-    tab.activeRunId = null;
+    if (tab.activeRunId === runId) tab.activeRunId = null;
     removePendingByRunId(tab, runId);
     resolveTabRunCompletion(tab, runId, errorMessage || "error");
   }
@@ -1584,6 +1744,17 @@ function handleChatEvent(payload) {
     updateSendButton();
     if (chatState === "delta" || chatState === "final") scrollToBottom();
   }
+}
+
+// Resolves any in-flight first-token waiter for runId. Called from BOTH chat
+// and agent event paths so the cascade treats thinking/tool activity as "the
+// run is healthy" — not just text deltas. Without this, a thinking model that
+// reasons + tool-calls for >8s before emitting text trips the cascade timeout.
+function markRunAlive(tab, runId) {
+  if (!tab.runFirstDelta?.has(runId)) return;
+  const fd = tab.runFirstDelta.get(runId);
+  tab.runFirstDelta.delete(runId);
+  fd.resolve();
 }
 
 function handleAgentEvent(payload) {
@@ -1596,6 +1767,11 @@ function handleAgentEvent(payload) {
     tab.bufferedEvents.push({ kind: "agent", payload });
     return;
   }
+  // Cascade: ignore agent events for silently-aborted runs — otherwise a
+  // thinking/tool delta arriving for an old tier creates an orphan "responding"
+  // turn card that never clears.
+  if (tab.silentRuns.has(runId)) return;
+  markRunAlive(tab, runId);
   const t = ensureTurn(runId, tab);
 
   if (stream === "tool") {
@@ -2061,6 +2237,9 @@ async function loadHistory(tab) {
       });
     }
     tab.historyLoaded = true;
+    // History exists → mode was already chosen (or chose-not-to) for this
+    // session. Lock the picker so we don't re-inject mid-conversation.
+    if (msgs.length > 0) { tab.modeApplied = true; if (tab === currentTab()) syncModePicker(tab); }
   } catch (e) {
     renderError("Could not load history: " + e.message, tab);
   } finally {
@@ -2135,26 +2314,50 @@ async function ensureModelSelected(tab) {
 async function onSend() {
   const tab = currentTab();
   if (!tab) return;
-  if (tab.activeRunId) return onStop();
-  const text = $input.value.trim();
+  let text = $input.value.trim();
+  // Type-to-interrupt: if a run is in flight, abort it. Clawd can hang for
+  // minutes in a blocking tool call (e.g. cc-session.sh manage waiting on
+  // Claude Code) before honoring the abort, so we clear local state right
+  // away and fire the abort fire-and-forget. If the user typed something,
+  // proceed with the new send below; otherwise this was just a Stop.
+  if (tab.activeRunId) {
+    abortAndClearLocally(tab);
+    if (!text) return;
+  }
   if (!text) return;
   if (!state.connected) { renderError("Not connected", tab); return; }
+
+  // On the first send of a tab that has a mode selected, prepend the mode's
+  // .md content as a <mode> block so the agent sees it as part of the user's
+  // opening turn. modeApplied + the locked picker prevent double-injection.
+  const userText = text;  // pre-prepend, used for the ack filler
+  if (!tab.modeApplied && (tab.turnCount || 0) === 0 && tab.selectedMode) {
+    const m = state.modesById[tab.selectedMode];
+    if (m && m.content) {
+      text = `<mode name="${m.slug}">\n${m.content.trim()}\n</mode>\n\n${text}`;
+    }
+    tab.modeApplied = true;
+    syncModePicker(tab);
+    saveTabs();
+  }
 
   const empty = tab.paneEl.querySelector(".empty");
   if (empty) empty.remove();
 
-  // New turn: clear any in-flight TTS / filler state from the prior turn.
+  // New turn: clear any in-flight TTS / filler state from the prior turn, and
+  // lift any panic-stop mute so this turn speaks normally.
+  _ttsMuted = false;
   ttsReset();
   // Fire Haiku stall-talk in parallel with the real RPC so the user hears
   // an ack within ~1s instead of waiting for the main model's first token.
   // Opening the ack window buffers any real text deltas that arrive before
   // the ack response — guarantees ack speaks first. Skip entirely for short
   // messages and bare greetings — the real reply is faster than the stall.
-  if (_ttsEnabled && !shouldSkipAck(text)) {
+  if (_ttsEnabled && !shouldSkipAck(userText)) {
     openAckWindow();
     fillerSpeak({
       kind: "ack",
-      lastUser: text,
+      lastUser: userText,
       history: fillerHistorySnapshot(tab, 3),
     });
   }
@@ -2168,6 +2371,24 @@ async function onSend() {
   saveDraft(tab, "");
   autosize($input);
 
+  await sendWithCascade(tab, text, pendingId);
+}
+
+// Single clean send: exactly ONE chat.send per user utterance — no client-side
+// retries and no per-tier /model switching. OpenClaw owns provider failover via
+// the agent's configured `fallbacks` (it correctly fails over on thrown
+// auth/rate-limit errors), so the webchat must never re-send the same message.
+//
+// Why this matters: each chat.send makes OpenClaw append a user turn to the
+// session *immediately*, before generation. The old cascade aborted a tier on
+// an 8s timeout and re-sent the same text to the next tier — but OpenClaw has
+// no per-turn rewind RPC, so every aborted tier left an orphaned `user:Q →
+// assistant:(empty)` pair in the transcript it replays to the model. The model
+// then saw Q as unanswered and re-answered it alongside the next question, and
+// the orphans accumulated over a session ("context creep"). One send = no
+// orphans. The function name is kept so the call site stays unchanged.
+async function sendWithCascade(tab, text, pendingId) {
+  tab.cascadeAborted = false;  // reset at start of every send
   try {
     await ensureModelSelected(tab);
     const res = await rpc("chat.send", {
@@ -2177,14 +2398,21 @@ async function onSend() {
       deliver: false,
       idempotencyKey: uuid(),
     });
-    if (res?.runId) {
-      tab.activeRunId = res.runId;
-      setPendingRunId(tab, pendingId, res.runId);
-      updateSendButton();
-    }
+    if (!res?.runId) throw new Error("chat.send returned no runId");
+    tab.activeRunId = res.runId;
+    setPendingRunId(tab, pendingId, res.runId);
+    updateSendButton();
+    // handleChatEvent / handleAgentEvent own the rest of the run lifecycle.
   } catch (e) {
+    console.warn("[send] failed:", e.message);
+    // User clicked Stop mid-send (abortAndClearLocally set the flag) — bail
+    // quietly without rendering an error.
+    if (tab.cascadeAborted) {
+      tab.cascadeAborted = false;
+    } else {
+      renderError("send failed: " + e.message, tab);
+    }
     removePendingById(tab, pendingId);
-    renderError("chat.send failed: " + e.message, tab);
     tab.activeRunId = null;
     updateSendButton();
   }
@@ -2193,11 +2421,32 @@ async function onSend() {
 async function onStop() {
   const tab = currentTab();
   if (!tab || !tab.activeRunId) return;
-  try {
-    await rpc("chat.abort", { sessionKey: tab.sessionKey, runId: tab.activeRunId });
-  } catch (e) {
-    renderError("chat.abort failed: " + e.message, tab);
+  abortAndClearLocally(tab);
+}
+
+// Optimistically tear down the active run on the client so the UI never sticks
+// when the gateway is slow to honor an abort. Adds the runId to silentRuns so
+// any late deltas / final-event from the doomed run are swallowed cleanly, and
+// fires the abort RPC fire-and-forget — awaiting it would re-introduce the
+// hang we're trying to avoid.
+function abortAndClearLocally(tab) {
+  const runId = tab.activeRunId;
+  if (!runId) return;
+  tab.cascadeAborted = true;
+  tab.silentRuns.add(runId);
+  tab.activeRunId = null;
+  const t = tab.runs.get(runId);
+  if (t) {
+    if (t.tickerId) clearInterval(t.tickerId);
+    if (t.footerEl) {
+      t.footerEl.innerHTML = `<div style="color:var(--warn); font-size:12px">⏹ stopped</div>`;
+    }
   }
+  removePendingByRunId(tab, runId);
+  resolveTabRunCompletion(tab, runId, "aborted");
+  if (tab === currentTab()) updateSendButton();
+  rpc("chat.abort", { sessionKey: tab.sessionKey, runId })
+    .catch((e) => console.warn("chat.abort failed:", e.message));
 }
 
 async function resetTab(tab) {
@@ -2278,15 +2527,48 @@ function toggleSpeechMode() {
   const on = $widget.classList.toggle("speech");
   localStorage.setItem("clawd.speech", on ? "1" : "0");
   if (!on) setSubtitle("");
+  // Auto-focus the invisible composer so the user can just start typing.
+  if (on) requestAnimationFrame(() => document.getElementById("speechInput")?.focus());
 }
 if (localStorage.getItem("clawd.speech") === "1") {
   $widget.classList.add("speech");
+  requestAnimationFrame(() => document.getElementById("speechInput")?.focus());
 }
-document.getElementById("speechMode").addEventListener("click", toggleSpeechMode);
+document.getElementById("speechMode").addEventListener("click", (e) => {
+  // Don't toggle off when interacting with the inline composer or HUD.
+  if (e.target.closest("#speechComposer, #speechHud")) return;
+  toggleSpeechMode();
+});
+
+// Inline composer inside speech mode — forwards through onSend / onStop so
+// it shares TTS, ack, stop-button, and draft behavior with the main composer.
+const $speechInput = document.getElementById("speechInput");
+function speechSend() {
+  const tab = currentTab();
+  const text = $speechInput.value.trim();
+  // Same type-to-interrupt semantics as the main composer: typing a new
+  // message while busy aborts the active run and sends the new text.
+  if (tab && tab.activeRunId) {
+    abortAndClearLocally(tab);
+    if (!text) return;
+  }
+  if (!text) return;
+  $input.value = text;
+  $speechInput.value = "";
+  onSend();
+}
+$speechInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    speechSend();
+  }
+});
 
 // ── Text-to-speech ─────────────────────────────────────────────────────────
 const $btnSpeak = document.getElementById("btnSpeak");
 let _ttsEnabled = localStorage.getItem("clawd.tts") === "1";
+let _ttsMuted = false;      // one-shot "shut up" — silences TTS for the rest of
+                            // the current turn (panic stop). Cleared on next send.
 let _ttsSpokenUpTo = 0;     // char count of fullText already enqueued/spoken
 let _ttsTurnFullText = "";  // latest fullText for picking chat variant
 let _ttsIdleTimer = null;
@@ -2364,6 +2646,18 @@ function ttsReset() {
   // Unblock any drain loop awaiting the (now-stopped) audio.
   if (_ttsResolveCurrent) { const r = _ttsResolveCurrent; _ttsResolveCurrent = null; r(); }
   setSubtitle("");
+}
+
+// Panic "shut up" — silences clawd immediately AND keeps him silent for the
+// rest of this turn. Does NOT abort the run (any background work/build keeps
+// going); it only kills speech. _ttsMuted gates ttsFeed/ttsEnqueue/fillerSpeak
+// so streaming deltas can't restart talking. Cleared at the next user send
+// (onSend), so the next message speaks normally. Wired to the 🤫 button and
+// the Ctrl+Option+Cmd+Delete global hotkey.
+function stopTalking() {
+  _ttsMuted = true;
+  ttsReset();            // kill current audio, queue, in-flight TTS fetches, subtitle
+  try { clawdVid.idle(true); } catch {}
 }
 
 async function ttsFetchChunk(text, turnId) {
@@ -2458,6 +2752,7 @@ async function ttsDrainQueue() {
 // queue and put a 1.5s grace timer on any currently-playing tool/thinking
 // audio. Ack is exempt — it always plays through.
 function ttsEnqueue(text, kind = "real") {
+  if (_ttsMuted) return;   // panic-stop backstop — block real + filler alike
   const stripped = ttsStrip(text).trim();
   if (kind === "ack") ackTrace("ttsEnqueue called", { stripped, realAudioStarted: _ttsRealAudioStarted, ackWindowOpen: _ackWindowOpen });
   if (!stripped) { if (kind === "ack") ackTrace("DROP: stripped text empty"); return; }
@@ -2517,7 +2812,7 @@ function ackTrace(...args) {
 
 async function fillerSpeak({ kind, lastUser, toolName, toolInput, thinkingText, history }) {
   if (kind === "ack") { _ackTraceStart = Date.now(); ackTrace("fillerSpeak ENTER", { ttsEnabled: _ttsEnabled, ttsMode: _ttsMode, realArrived: _ttsRealArrived, realAudioStarted: _ttsRealAudioStarted, ackWindowOpen: _ackWindowOpen, fillerInflight: _fillerInflight }); }
-  if (!_ttsEnabled) { if (kind === "ack") ackTrace("DROP: tts disabled"); return; }
+  if (!_ttsEnabled || _ttsMuted) { if (kind === "ack") ackTrace("DROP: tts disabled/muted"); return; }
   if (_ttsMode === "browser") { if (kind === "ack") ackTrace("DROP: tts mode is browser (no /api/tts pipeline)"); return; }
   // Entry guards (per-kind):
   //   - ack:               only blocked if real audio already started playing
@@ -2653,7 +2948,7 @@ const _TTS_SENT_RE  = /^([\s\S]*?[.!?\n])\s/;
 const _TTS_MAX_CHUNK = 240;
 
 function ttsFeed(fullText, isFinal) {
-  if (!_ttsEnabled) return;
+  if (!_ttsEnabled || _ttsMuted) return;
   // Hold real text while we're waiting for the ack to land. We only stash
   // the latest cumulative {fullText, isFinal} — closeAckWindow replays it.
   if (_ackWindowOpen) {
@@ -2734,6 +3029,10 @@ $btnSpeak.addEventListener("click", () => {
   if (!_ttsEnabled) ttsReset();
 });
 
+// 🤫 panic "shut up" — stop talking now without disabling TTS for next turn.
+const $btnStopTalk = document.getElementById("btnStopTalk");
+if ($btnStopTalk) $btnStopTalk.addEventListener("click", stopTalking);
+
 // ── Voice input ────────────────────────────────────────────────────────────
 const $btnMic = document.getElementById("btnMic");
 let _recog = null;
@@ -2776,7 +3075,13 @@ function startRecording() {
   };
   r.onerror = (e) => {
     clearTimeout(silenceTimer);
-    if (e.error !== "aborted") console.warn("mic:", e.error);
+    if (e.error !== "aborted" && e.error !== "no-speech") {
+      console.warn("mic:", e.error);
+      if (e.error === "not-allowed" || e.error === "service-not-allowed")
+        renderError("🎤 blocked — this window needs microphone permission. Open DevTools→reload, or relaunch the app window and click Allow.");
+      else
+        renderError("🎤 error: " + e.error);
+    }
     _cancelSend = true;
     stopRecording();
   };
@@ -2790,7 +3095,17 @@ function startRecording() {
     else clawdVid.idle(true);
   };
   _recog = r;
-  r.start();
+  try {
+    r.start();
+  } catch (err) {
+    // r.start() throws synchronously if a prior recognition instance still holds
+    // the mic (toggle desync) — this used to fail completely silently.
+    console.warn("mic start failed:", err);
+    renderError("🎤 couldn't start: " + (err && err.message ? err.message : err) + " — try once more.");
+    _recog = null;
+    _recording = false;
+    try { clawdVid.idle(true); } catch {}
+  }
 }
 
 function stopRecording() {
@@ -2814,6 +3129,8 @@ _micEvents.onmessage = (e) => {
     revealHistory();
   } else if (e.data === "new-tab") {
     createTab();
+  } else if (e.data === "stop-talking") {
+    stopTalking();
   } else if (e.data === "toggle-speech-mode") {
     toggleSpeechMode();
   }
@@ -2831,6 +3148,23 @@ function initModelPicker() {
     const t = currentTab();
     if (!t) return;
     t.selectedModel = sel.value;
+    saveTabs();
+  });
+}
+
+// ── Mode picker ────────────────────────────────────────────────────────────
+function initModePicker() {
+  const sel = document.getElementById("modePicker");
+  if (!sel) return;
+  sel.addEventListener("change", () => {
+    const t = currentTab();
+    if (!t) return;
+    if (t.modeApplied || (t.turnCount || 0) > 0) {
+      syncModePicker(t);  // snap back; not allowed mid-conversation
+      return;
+    }
+    t.selectedMode = sel.value || "";
+    syncModePicker(t);
     saveTabs();
   });
 }
@@ -2898,6 +3232,8 @@ async function boot() {
   state.tabs.forEach(t => t.paneEl.classList.toggle("active", t.id === state.activeTabId));
   renderTabs();
   initModelPicker();
+  initModePicker();
+  loadModes();
   // Restore composer draft for the active tab
   const _activeTab = currentTab();
   if (_activeTab) {
