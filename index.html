@@ -2532,7 +2532,9 @@ async function ttsDrainQueue() {
     _ttsDraining = false;
   }
   if (!_ttsAudio && !_ttsQueue.length) {
-    _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 250);
+    // Snap to idle right when audio ends so his lips don't keep moving after
+    // the voice stops (short grace only, to bridge tiny gaps between chunks).
+    _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 80);
     setSubtitle("");
   }
 }
@@ -2789,7 +2791,7 @@ function ttsFeed(fullText, isFinal) {
     const utt = new SpeechSynthesisUtterance(stripped);
     utt.rate = 1.25;
     utt.onstart = () => { clearTimeout(_ttsIdleTimer); clawdVid.chatting(_ttsTurnFullText); setSubtitle(stripped); };
-    utt.onend   = () => { _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 250); setSubtitle(""); };
+    utt.onend   = () => { _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 80); setSubtitle(""); };
     return utt;
   }
   if (isFinal) {

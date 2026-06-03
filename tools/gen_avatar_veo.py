@@ -33,8 +33,8 @@ CHAR = ("A red triangular crystalline Pepe-like character with heavy-lidded sly 
 CLIPS = {
     # idle
     "idle.mp4": ("Subtle idle: slow breathing, one lazy blink, neon glow shimmering. Almost still. MOUTH CLOSED and still the whole time — he is NOT talking, no lip or jaw movement.", 5),
-    "idle_1.mp4": ("Relaxed idle, a slow blink, ambient neon flicker. MOUTH CLOSED and still the entire time — he is NOT talking, no lip movement; only eyes and subtle breathing move.", 5),
-    "idle_2.mp4": ("Idle with a slow confident head tilt, then settle back to center. MOUTH CLOSED and still — he is NOT talking, no lip or jaw movement.", 5),
+    "idle_1.mp4": ("Lifts a sleek vape pen to his mouth in one claw, takes a slow drag, lowers it, and exhales a thin curl of neon-lit vapor, unbothered and cool. A clear vaping action — not talking.", 6),
+    "idle_2.mp4": ("A big sleepy tired yawn: eyes squeeze fully shut, he raises a claw to cover his open mouth mid-yawn, shoulders relax, then he blinks slowly and settles into a drowsy half-lidded look. Clearly exhausted and yawning — NOT smiling, NOT laughing, NOT talking.", 5),
     "idle_lookaround.mp4": ("Eyes glance left, then right, scanning, then back to camera. MOUTH CLOSED and still the whole time — he is NOT talking, no lip movement; only the eyes move.", 5),
     "idle-smoking.mp4": ("Takes a slow drag from a thin vape, exhales a curl of neon-lit smoke, unbothered.", 6),
     "idle-rare-eats-a-burger.mp4": ("Casually takes a bite of a cheeseburger held in a claw, chews, satisfied nod.", 6),
@@ -110,13 +110,31 @@ def padded_source(aspect, scale=0.82):
     return out
 
 
+# Negative-prompt profiles. All ban camera moves; they differ on the mouth.
+_NEG_ZOOM = "camera zoom, zoom in, push in, dolly, camera pan, camera movement, shaky camera"
+_NEG_STILL = "talking, speaking, open mouth, moving lips, lip sync, mouth movement, " + _NEG_ZOOM   # neutral idles
+_NEG_ACTION = "talking, speaking, conversation, lip sync, " + _NEG_ZOOM                              # vape/yawn/coffee/etc — allow the action's mouth
+
+def neg_for(name):
+    # Talking clips must keep their mouth moving — only forbid camera moves.
+    if name.startswith(("chatting", "talking", "short-subtle", "saying-hello", "explaining")):
+        return _NEG_ZOOM
+    # Purposeful mouth/hand actions: forbid talking + camera, allow the action.
+    if name in ("idle_1.mp4", "idle_2.mp4", "idle-sipping-coffee.mp4", "idle-smoking.mp4",
+                "idle-rare-eats-a-burger.mp4", "idle-guy-fawkes-mask.mp4"):
+        return _NEG_ACTION
+    # Everything else (neutral idle / thinking / building): mouth stays shut.
+    return _NEG_STILL
+
+
 def generate(name, prompt, dur, key, model, aspect, ref):
     img_b64 = base64.b64encode(ref.read_bytes()).decode()
     payload = {
         "instances": [{"prompt": CHAR + prompt,
                        "image": {"bytesBase64Encoded": img_b64, "mimeType": "image/png"}}],
         "parameters": {"aspectRatio": aspect, "durationSeconds": int(dur),
-                       "personGeneration": "allow_adult"},
+                       "personGeneration": "allow_adult",
+                       "negativePrompt": neg_for(name)},
     }
     print(f"[{name}] submitting ({dur}s, {aspect})...")
     op = _post(f"{API}/models/{model}:predictLongRunning?key={key}", payload)
