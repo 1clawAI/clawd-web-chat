@@ -531,10 +531,6 @@
 <!-- Settings panel (separate overlay, near widget) -->
 <div id="settings">
   <h3>Settings</h3>
-  <label>WebSocket URL</label>
-  <input id="optWsUrl" placeholder="ws://127.0.0.1:18789" />
-  <label>Auth Token</label>
-  <input id="optToken" type="password" placeholder="gateway.auth.token" />
   <label>Bankr API Key</label>
   <input id="optBankrKey" type="password" placeholder="bk_… (auto tab titles)" />
   <label>Thinking</label>
@@ -546,7 +542,7 @@
   </select>
   <div class="row-btn">
     <button id="btnSettingsClose">Cancel</button>
-    <button id="btnSettingsSave" class="primary">Save &amp; reconnect</button>
+    <button id="btnSettingsSave" class="primary">Save</button>
   </div>
 </div>
 
@@ -881,15 +877,10 @@ function cascadeChain(startModel) {
 }
 
 const state = {
-  ws: null,
-  reqSeq: 0,
-  pending: new Map(),
-  config: null,         // { wsUrl, token } — sessionKey now lives per-tab
+  config: null,         // { bankrKey } — Hermes URL/key live server-side
   connected: false,
   thinking: localStorage.getItem("clawd.thinking") || "high",
-  identity: null,
-  connectNonce: null,
-  tabs: [],             // [{ id, sessionKey, displayName, selectedModel, lastSentModel, activeRunId, runs, runCompletions, paneEl, historyLoaded, verboseEnabled, dirty }]
+  tabs: [],             // [{ id, sessionKey, displayName, selectedModel, activeRunId, runs, runCompletions, paneEl, historyLoaded, hermesAbort, dirty }]
   activeTabId: null,
 };
 
@@ -903,8 +894,6 @@ const $btnNewTab    = document.getElementById("btnNewTab");
 const $btnSettingsClose = document.getElementById("btnSettingsClose");
 const $btnSettingsSave  = document.getElementById("btnSettingsSave");
 const $settings     = document.getElementById("settings");
-const $optWsUrl     = document.getElementById("optWsUrl");
-const $optToken     = document.getElementById("optToken");
 const $optThinking  = document.getElementById("optThinking");
 const $statusDot    = document.getElementById("statusDot");
 const $widget       = document.getElementById("widget");
@@ -1207,21 +1196,7 @@ async function switchTab(id) {
   updateSendButton();
   renderTabs();
   saveTabs();
-  if (state.connected) {
-    if (!t.verboseEnabled) {
-      try {
-        await rpc("sessions.patch", {
-          key: t.sessionKey,
-          verboseLevel: "on",
-          reasoningLevel: "stream",  // emit live thinking_delta agent events
-        });
-        t.verboseEnabled = true;
-      } catch (e) {
-        console.warn("sessions.patch failed:", e.message);
-      }
-    }
-    if (!t.historyLoaded) await loadHistory(t);
-  }
+  if (state.connected && !t.historyLoaded) loadHistory(t);
   // Restore the per-tab scroll position
   requestAnimationFrame(() => {
     const el = getMsgArea();
@@ -1296,10 +1271,9 @@ async function autoTitleTab(tab, seedText) {
       // Turn 1: we already have the user's message — skip the history RPC
       context = `user: ${seedText.slice(0, 400)}`;
     } else {
-      const res = await rpc("chat.history", { sessionKey: tab.sessionKey, limit: 20 });
-      context = (res.messages || res.items || [])
+      context = getCachedTurns(tab)
         .filter(m => m.role === "user" || m.role === "assistant")
-        .map(m => `${m.role}: ${extractText(m.content).slice(0, 400)}`)
+        .map(m => `${m.role}: ${(m.text || "").slice(0, 400)}`)
         .join("\n\n");
     }
     if (!context) return;
@@ -1326,8 +1300,6 @@ async function autoTitleTab(tab, seedText) {
 
 // ── Settings panel ─────────────────────────────────────────────────────────
 function openSettings() {
-  $optWsUrl.value = state.config?.wsUrl || "";
-  $optToken.value = state.config?.token || "";
   document.getElementById("optBankrKey").value = state.config?.bankrKey || "";
   $optThinking.value = state.thinking;
   $settings.classList.add("open");
@@ -1337,14 +1309,12 @@ function closeSettings() { $settings.classList.remove("open"); }
 $btnSettings.onclick = openSettings;
 $btnSettingsClose.onclick = closeSettings;
 $btnSettingsSave.onclick = async () => {
-  const cfg = { wsUrl: $optWsUrl.value.trim(), token: $optToken.value.trim(), bankrKey: document.getElementById("optBankrKey").value.trim() };
+  const cfg = { bankrKey: document.getElementById("optBankrKey").value.trim() };
   localStorage.setItem("clawd.config", JSON.stringify(cfg));
   state.thinking = $optThinking.value;
   localStorage.setItem("clawd.thinking", state.thinking);
   state.config = cfg;
   closeSettings();
-  if (state.ws) try { state.ws.close(); } catch {}
-  connect();
 };
 
 // ── Rendering (per-tab) ────────────────────────────────────────────────────
@@ -1592,36 +1562,9 @@ function markDirtyIfBackground(tab) {
 // delta stream didn't carry (common for non-Anthropic models via OpenAI-
 // compat APIs — they only stream text, openclaw extracts thinking later).
 async function syncTurnFromHistory(tab, turn) {
-  if (!turn || !turn.container || !turn.container.isConnected) return;
-  try {
-    const res = await rpc("chat.history", { sessionKey: tab.sessionKey, limit: 4 });
-    const msgs = res.messages || res.items || [];
-    // Find the most recent assistant message (corresponds to this just-final run)
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const m = msgs[i];
-      if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
-      for (const b of m.content) {
-        if (b?.type === "thinking" && typeof b.thinking === "string") {
-          if (!turn.thinkingEl) {
-            turn.thinkingEl = renderThinkingCard(turn.container, "thinking", b.thinking, false);
-            turn.container.insertBefore(turn.thinkingEl, turn.toolsEl);
-          } else {
-            updateThinkingCard(turn.thinkingEl, b.thinking);
-          }
-        }
-        // (tool_use blocks should already be rendered from agent events)
-      }
-      // If the streaming text was empty/partial, take the canonical text too
-      const finalText = extractText(m.content);
-      if (finalText && (!turn.lastText || turn.lastText.length < finalText.length)) {
-        turn.lastText = finalText;
-        turn.textEl.innerHTML = renderText(finalText);
-      }
-      break;
-    }
-  } catch (e) {
-    if (window.__clawdDebug) console.warn("syncTurnFromHistory:", e);
-  }
+  // No-op for Hermes: the /v1/chat/completions stream already delivers the full
+  // assistant text inline, and there's no server history endpoint to reconcile
+  // against. Kept as a stub so the chat:final path stays unchanged.
 }
 
 // ── Event handlers ─────────────────────────────────────────────────────────
@@ -1853,177 +1796,144 @@ function handleAgentEvent(payload) {
   if (tab === currentTab()) scrollToBottom();
 }
 
-// ── WebSocket connection + RPC ─────────────────────────────────────────────
+// ── Hermes transport (OpenAI-compatible SSE via the local proxy) ───────────
+// No socket: server.py holds the Hermes bearer key and proxies /api/hermes/chat.
+// connect() just flips to "connected" and repaints the tab's locally-cached
+// transcript. Agent continuity is server-side in Hermes, keyed by the session
+// key header we send on every turn; the cache is only for repainting the UI.
 function connect() {
-  if (!state.config?.wsUrl) {
-    setStatus("bad", "no gateway URL");
-    return;
-  }
-  setStatus("connecting", "connecting…");
-  state.connectNonce = null;
+  state.connected = true;
+  const tab = currentTab();
+  setStatus("ok", tab ? tab.sessionKey : "ready");
+  updateSendButton();
+  if (tab && !tab.historyLoaded) loadHistory(tab);
+}
 
-  let ws;
-  try { ws = new WebSocket(state.config.wsUrl); }
-  catch (e) {
-    setStatus("bad", "bad url");
-    renderError("Failed to open WebSocket: " + e.message);
-    return;
-  }
-  state.ws = ws;
+// One streaming chat turn. POSTs {sessionKey, text} to the proxy, parses the
+// SSE, and dispatches synthesized payloads into the SAME renderers the old WS
+// client used (handleChatEvent / handleAgentEvent). `runId` is a client-minted
+// id shared by every event of the turn so ensureTurn() groups them under one
+// card. Resolves when the stream ends; throws on transport/proxy errors.
+async function hermesSend(tab, text, runId) {
+  const controller = new AbortController();
+  tab.hermesAbort = controller;
+  const sk = tab.sessionKey;
+  let acc = "";            // accumulated assistant text
+  let sawFinal = false;
+  const emitChat  = (chatState, extra) => handleChatEvent({ runId, sessionKey: sk, state: chatState, ...extra });
+  const emitAgent = (stream, data)     => handleAgentEvent({ runId, sessionKey: sk, stream, data });
 
-  ws.onopen = async () => {
-    try {
-      const ident = await getOrCreateIdentity();
-      const scopes = ["operator.read", "operator.write", "operator.admin"];
-      const clientId = "openclaw-control-ui";
-      const clientMode = "ui";
-      const role = "operator";
-      const device = await signDevicePayload(ident, {
-        clientId, clientMode, role, scopes, token: state.config.token || null, nonce: state.connectNonce || null,
-      });
-      await rpc("connect", {
-        minProtocol: 3,
-        maxProtocol: 3,
-        client: { id: clientId, displayName: "clawd-web", version: "0.1.0", platform: "web", mode: clientMode },
-        role, scopes,
-        caps: ["tool-events"],
-        auth: state.config.token ? { token: state.config.token } : undefined,
-        locale: navigator.language || "en-US",
-        userAgent: navigator.userAgent,
-        device,
-      });
-      onConnected();
-    } catch (err) {
-      setStatus("bad", "auth failed");
-      renderError("Handshake failed: " + (err.message || err));
+  function dispatchSseFrame(frame) {
+    let eventName = "message";
+    const dataLines = [];
+    for (const line of frame.split("\n")) {
+      if (line.startsWith("event:")) eventName = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
     }
-  };
+    const raw = dataLines.join("\n");
+    if (!raw || raw === "[DONE]") return;
+    let obj;
+    try { obj = JSON.parse(raw); } catch { return; }
+    if (window.__clawdDebug) {
+      window.__eventLog.push({ event: eventName, payload: obj, ts: Date.now() });
+      if (window.__eventLog.length > 500) window.__eventLog.shift();
+    }
 
-  ws.onmessage = (ev) => {
-    let frame;
-    try { frame = JSON.parse(ev.data); } catch { console.warn("bad frame", ev.data); return; }
-    onFrame(frame);
-  };
-
-  ws.onclose = (ev) => {
-    setStatus("bad", `disconnected (${ev.code})`);
-    state.connected = false;
-    for (const t of state.tabs) t.activeRunId = null;
-    updateSendButton();
-    if (ev.code === 1008) {
-      renderError(
-        "Gateway rejected the connection (1008). Likely causes:\n" +
-        "  • Our origin isn't in gateway.controlUi.allowedOrigins\n" +
-        "  • Device pairing is required (see `openclaw devices list`)\n" +
-        "  • Auth token is wrong\n\n" +
-        "See the clawd-web README for the fix."
-      );
+    if (eventName === "hermes.tool.progress") {
+      const id = obj.toolCallId || ("tool-" + Date.now());
+      if (obj.status === "running") {
+        emitAgent("tool", { phase: "start", toolCallId: id, name: obj.tool || "tool",
+          args: obj.label ? { command: obj.label } : undefined });
+      } else {  // completed | error
+        emitAgent("tool", { phase: "result", toolCallId: id, name: obj.tool,
+          isError: obj.status === "error",
+          output: obj.status === "error" ? (obj.error || "error") : "(done)" });
+      }
       return;
     }
-    if (ev.code !== 1000) {
-      setTimeout(() => { if (!state.connected) connect(); }, 2000);
+
+    // Otherwise: a standard OpenAI chat.completion.chunk
+    const choice = obj.choices && obj.choices[0];
+    if (!choice) return;
+    const delta = choice.delta || {};
+    if (typeof delta.content === "string" && delta.content) {
+      acc += delta.content;
+      emitChat("delta", { message: { content: [{ type: "text", text: acc }] } });
     }
-  };
-
-  ws.onerror = () => {};
-}
-
-// ── Ed25519 device identity ────────────────────────────────────────────────
-async function getOrCreateIdentity() {
-  if (state.identity) return state.identity;
-  const stored = localStorage.getItem("clawd.identity");
-  if (stored) {
-    try {
-      const obj = JSON.parse(stored);
-      const privateKey = await crypto.subtle.importKey("jwk", obj.privJwk, { name: "Ed25519" }, true, ["sign"]);
-      state.identity = { privateKey, deviceId: obj.deviceId, publicKey: obj.publicKey };
-      return state.identity;
-    } catch (e) { console.warn("stored identity unusable, regenerating:", e); }
-  }
-  let kp;
-  try { kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]); }
-  catch (e) { throw new Error("Ed25519 not supported in this browser — needs Chrome 112+ / Safari 17+ / Firefox 129+"); }
-  const rawPub = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
-  const deviceIdBytes = new Uint8Array(await crypto.subtle.digest("SHA-256", rawPub));
-  const deviceId = bytesToHex(deviceIdBytes);
-  const publicKey = bytesToB64Url(rawPub);
-  const privJwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
-  localStorage.setItem("clawd.identity", JSON.stringify({ deviceId, publicKey, privJwk }));
-  state.identity = { privateKey: kp.privateKey, deviceId, publicKey };
-  return state.identity;
-}
-
-async function signDevicePayload(identity, { clientId, clientMode, role, scopes, token, nonce }) {
-  const signedAtMs = Date.now();
-  const version = nonce ? "v2" : "v1";
-  const parts = [version, identity.deviceId, clientId, clientMode, role, scopes.join(","), String(signedAtMs), token || ""];
-  if (version === "v2") parts.push(nonce || "");
-  const payload = parts.join("|");
-  const sigBuf = await crypto.subtle.sign({ name: "Ed25519" }, identity.privateKey, new TextEncoder().encode(payload));
-  const out = { id: identity.deviceId, publicKey: identity.publicKey, signature: bytesToB64Url(new Uint8Array(sigBuf)), signedAt: signedAtMs };
-  if (nonce) out.nonce = nonce;
-  return out;
-}
-
-function bytesToHex(u8) { return Array.from(u8, b => b.toString(16).padStart(2, "0")).join(""); }
-function bytesToB64Url(u8) {
-  let s = "";
-  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function onFrame(frame) {
-  if (frame.type === "res") {
-    const p = state.pending.get(frame.id);
-    if (p) {
-      state.pending.delete(frame.id);
-      if (frame.ok) p.resolve(frame.payload);
-      else p.reject(new Error(frame.error?.message || "rpc error"));
-    }
-    return;
-  }
-  if (frame.type === "event") {
-    switch (frame.event) {
-      case "chat":  return handleChatEvent(frame.payload);
-      case "agent": return handleAgentEvent(frame.payload);
-      case "connect.challenge":
-        if (frame.payload?.nonce) state.connectNonce = frame.payload.nonce;
-        return;
-      case "tick": case "presence": case "health": return;
-      default:
-        if (window.__clawdDebug) console.debug("[unhandled event]", frame.event, frame.payload);
-        return;
+    if (choice.finish_reason) {
+      sawFinal = true;
+      emitChat("final", { message: { content: [{ type: "text", text: acc }] } });
+      saveTurnToCache(tab, text, acc);
     }
   }
-}
 
-function rpc(method, params) {
-  return new Promise((resolve, reject) => {
-    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return reject(new Error("not connected"));
-    const id = "r" + (++state.reqSeq);
-    state.pending.set(id, { resolve, reject });
-    state.ws.send(JSON.stringify({ type: "req", id, method, params }));
-    setTimeout(() => {
-      if (state.pending.has(id)) { state.pending.delete(id); reject(new Error(method + " timed out")); }
-    }, 60000);
-  });
-}
-
-async function onConnected() {
-  state.connected = true;
-  updateSendButton();
-  const tab = currentTab();
-  if (!tab) { setStatus("bad", "(no tab)"); return; }
-  setStatus("ok", tab.sessionKey);
+  let resp;
   try {
-    await rpc("sessions.patch", {
-      key: tab.sessionKey,
-      verboseLevel: "on",
-      reasoningLevel: "stream",  // emit live thinking_delta agent events
+    resp = await fetch("/api/hermes/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionKey: sk, text }),
+      signal: controller.signal,
     });
-    tab.verboseEnabled = true;
-  } catch (e) { console.warn("sessions.patch failed:", e.message); }
-  await loadHistory(tab);
+  } catch (e) {
+    if (controller.signal.aborted) return;   // user hit Stop before headers
+    throw e;
+  }
+  if (!resp.ok || !resp.body) {
+    let msg = `proxy ${resp.status}`;
+    try { const j = await resp.json(); msg = j.error || msg; } catch {}
+    throw new Error(msg);
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {       // SSE frames split on blank line
+        dispatchSseFrame(buf.slice(0, idx));
+        buf = buf.slice(idx + 2);
+      }
+    }
+    if (buf.trim()) dispatchSseFrame(buf);
+  } catch (e) {
+    if (controller.signal.aborted) return;             // Stop button mid-stream
+    emitChat("error", { errorMessage: e.message });
+    return;
+  } finally {
+    if (tab.hermesAbort === controller) tab.hermesAbort = null;
+  }
+  // Stream closed cleanly without an explicit finish_reason — finalize.
+  if (!sawFinal) {
+    emitChat("final", { message: { content: [{ type: "text", text: acc }] } });
+    saveTurnToCache(tab, text, acc);
+  }
+}
+
+// ── Local transcript cache ──────────────────────────────────────────────────
+// Hermes exposes no history endpoint, so we cache rendered turns per session
+// key in localStorage purely to repaint the UI on reload/tab-switch. (The
+// agent's own memory is server-side, keyed by the X-Hermes-Session-Key header.)
+const HISTORY_KEY = "clawd.history";
+function _allHistory() { try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || "{}"); } catch { return {}; } }
+function _writeHistory(o) { try { localStorage.setItem(HISTORY_KEY, JSON.stringify(o)); } catch {} }
+function getCachedTurns(tab) { return _allHistory()[tab.sessionKey] || []; }
+function saveTurnToCache(tab, userText, assistantText) {
+  const all = _allHistory();
+  const list = all[tab.sessionKey] || [];
+  list.push({ role: "user", text: userText });
+  list.push({ role: "assistant", text: assistantText });
+  all[tab.sessionKey] = list.slice(-200);   // cap per session
+  _writeHistory(all);
+}
+function clearCachedTurns(tab) {
+  const all = _allHistory();
+  delete all[tab.sessionKey];
+  _writeHistory(all);
 }
 
 // ── Pending-message persistence ────────────────────────────────────────────
@@ -2105,152 +2015,48 @@ function _normalizeUserText(t) {
 }
 
 
-// ── History load ───────────────────────────────────────────────────────────
-async function loadHistory(tab) {
-  // Mark loading so concurrent chat/agent events get buffered (avoid race
-  // where mid-flight events render an assistant container before history,
-  // leaving DOM in wrong order or orphan run entries after pane clear).
-  tab.loadingHistory = true;
+// ── History load (from local cache — Hermes has no history endpoint) ────────
+function loadHistory(tab) {
+  tab.loadingHistory = false;   // synchronous repaint, no events to buffer
   tab.bufferedEvents = [];
   tab.paneEl.innerHTML = "";
-  tab.runs.clear();  // any stale turn entries from a prior connection
-  try {
-    const res = await rpc("chat.history", { sessionKey: tab.sessionKey, limit: 100 });
-    const msgs = res.messages || res.items || [];
-    if (msgs.length === 0) {
-      const el = document.createElement("div");
-      el.className = "empty";
-      el.innerHTML = `<h2>${tab.displayName}</h2><p>session: <code>${tab.sessionKey}</code><br/>no history yet — say something below.</p>`;
-      tab.paneEl.appendChild(el);
-      tab.historyLoaded = true;
-      return;
-    }
-
-    // Pair tool_use blocks with their tool_result outputs so the rendered
-    // history shows the same nice card view as live streaming. Handles BOTH
-    // the Anthropic shape (tool_use_id on block) and the openclaw shape
-    // (role="toolResult" with toolCallId at message level).
-    const toolResults = new Map();
-    for (const m of msgs) {
-      const c = m.content;
-      if (Array.isArray(c)) {
-        for (const b of c) {
-          if (b?.type === "tool_result" && b.tool_use_id) toolResults.set(b.tool_use_id, b);
-        }
-      }
-      if (m.role === "tool" && m.tool_use_id) toolResults.set(m.tool_use_id, m);
-      // openclaw style:
-      if (m.role === "toolResult" && m.toolCallId) toolResults.set(m.toolCallId, m);
-    }
-
-    let lastUserTs = null;
-    for (const m of msgs) {
-      const role = m.role || "system";
-      const content = m.content;
-
-      if (role === "user") {
-        // Skip user messages that are *only* tool_result blocks — they're paired
-        // into the preceding assistant card already.
-        if (Array.isArray(content) && content.length > 0 && content.every(b => b?.type === "tool_result")) continue;
-        // Strip openclaw's "System: ..." injection + timestamp wrappers so
-        // history renders the same as the live view did.
-        const rawText = extractText(content);
-        lastUserTs = parseHistoryTimestamp(rawText) || lastUserTs;
-        const typed = extractUserTypedText(rawText) || rawText || "(empty)";
-        const ageMs = lastUserTs ? Date.now() - lastUserTs : 0;
-        renderUserMessage(typed, tab, ageMs);
-      } else if (role === "assistant") {
-        const assistantText = extractText(content);
-        if (isModelSwitchMsg(assistantText)) continue;
-        const container = renderAssistantContainer(tab);
-        const textEl = container.querySelector(".text");
-        const toolsEl = container.querySelector(".tools");
-        if (Array.isArray(content)) {
-          for (const b of content) {
-            if (b?.type === "thinking" && typeof b.thinking === "string") {
-              const tEl = renderThinkingCard(container, "thinking", b.thinking, false);
-              container.insertBefore(tEl, toolsEl);
-            } else if (b?.type === "tool_use" || b?.type === "toolCall") {
-              const baseName = b.name || "tool";
-              const argSrc = b.input || b.arguments || {};
-              const argPreview = argSrc.command || argSrc.path || argSrc.url;
-              const title = argPreview ? `${baseName}: ${String(argPreview).slice(0, 60)}` : baseName;
-              const card = renderToolCard(toolsEl, title, argSrc);
-              const result = toolResults.get(b.id);
-              if (result) {
-                const out = extractToolResultText(result);
-                const isError = !!(result.is_error || result.isError);
-                updateToolResult(card, out, isError);
-              } else {
-                const statusEl = card.querySelector(".status");
-                statusEl.className = "status done";
-                statusEl.textContent = "done";
-              }
-            }
-          }
-        }
-        if (assistantText) textEl.innerHTML = renderText(assistantText);
-      } else if (role === "tool" || role === "toolResult") {
-        // Tool results are paired into the assistant card above; don't render again.
-        continue;
-      } else {
-        const text = extractText(content);
-        if (text && !isModelSwitchMsg(text)) renderSystem(text, tab);
-      }
-    }
-
-    // Drop any pending messages that already showed up in history; render the rest.
-    purgeOldPending(tab);  // TTL cleanup for orphaned entries
-    const historyUserTextsNorm = new Set(
-      msgs.filter(m => m.role === "user").map(m => _normalizeUserText(extractText(m.content)))
-    );
-    const pending = getPendingForTab(tab);
-    const stillPending = [];
-    for (const p of pending) {
-      const inHistory = historyUserTextsNorm.has(_normalizeUserText(p.text));
-      // Render the user message only if history doesn't already have it.
-      if (!inHistory) renderUserMessage(p.text, tab);
-
-      // CRITICAL: pending entry exists ⇒ chat:final hasn't popped it ⇒ the
-      // response is STILL in flight server-side. Always pre-create the
-      // response container so the user sees a "working" indicator instead of
-      // a gap, regardless of whether the user msg was persisted to history.
-      if (p.runId) {
-        ensureTurn(p.runId, tab);
-        tab.activeRunId = p.runId;
-        stillPending.push(p);  // keep until chat:final fires
-      } else if (!inHistory) {
-        stillPending.push(p);  // no runId yet, keep so we don't drop it
-      }
-      // If runId is null AND text is in history: orphan — drop it.
-    }
-    setPendingForTab(tab, stillPending);
-    if (tab === currentTab()) updateSendButton();
-    applyVisibility(tab.paneEl);
-
-    if (tab === currentTab()) {
-      requestAnimationFrame(() => {
-        const el = getMsgArea();
-        if (!el) return;
-        if (tab.scrollTop && tab.scrollTop > 0) el.scrollTop = tab.scrollTop;
-        else el.scrollTop = el.scrollHeight;
-      });
-    }
+  tab.runs.clear();
+  const turns = getCachedTurns(tab);
+  if (turns.length === 0) {
+    const el = document.createElement("div");
+    el.className = "empty";
+    el.innerHTML = `<h2>${tab.displayName}</h2><p>session: <code>${tab.sessionKey}</code><br/>no history yet — say something below.</p>`;
+    tab.paneEl.appendChild(el);
     tab.historyLoaded = true;
-    // History exists → mode was already chosen (or chose-not-to) for this
-    // session. Lock the picker so we don't re-inject mid-conversation.
-    if (msgs.length > 0) { tab.modeApplied = true; if (tab === currentTab()) syncModePicker(tab); }
-  } catch (e) {
-    renderError("Could not load history: " + e.message, tab);
-  } finally {
-    // Drain buffered events now that history is fully rendered.
-    tab.loadingHistory = false;
-    const buf = tab.bufferedEvents;
-    tab.bufferedEvents = [];
-    for (const ev of buf) {
-      if (ev.kind === "chat") handleChatEvent(ev.payload);
-      else if (ev.kind === "agent") handleAgentEvent(ev.payload);
+    return;
+  }
+  for (const m of turns) {
+    if (m.role === "user") {
+      renderUserMessage(m.text || "(empty)", tab);
+    } else {
+      const container = renderAssistantContainer(tab);
+      const textEl = container.querySelector(".text");
+      if (textEl && m.text) textEl.innerHTML = renderText(m.text);
     }
+  }
+
+  // A pending entry means a turn was in flight when we last unloaded; render
+  // its user bubble back so nothing is silently dropped (the run itself is
+  // gone — Hermes streams aren't resumable across reloads).
+  purgeOldPending(tab);
+  for (const p of getPendingForTab(tab)) renderUserMessage(p.text, tab);
+  clearPendingForTab(tab);
+
+  tab.historyLoaded = true;
+  tab.modeApplied = true;   // existing history ⇒ mode already decided
+  if (tab === currentTab()) { syncModePicker(tab); updateSendButton(); }
+  applyVisibility(tab.paneEl);
+  if (tab === currentTab()) {
+    requestAnimationFrame(() => {
+      const el = getMsgArea();
+      if (!el) return;
+      el.scrollTop = (tab.scrollTop && tab.scrollTop > 0) ? tab.scrollTop : el.scrollHeight;
+    });
   }
 }
 
@@ -2293,22 +2099,7 @@ function resolveTabRunCompletion(tab, runId, reason) {
 }
 
 async function ensureModelSelected(tab) {
-  if (tab.selectedModel === tab.lastSentModel) return;
-  const model = tab.selectedModel;
-  const res = await rpc("chat.send", {
-    sessionKey: tab.sessionKey,
-    message: `/model ${model}`,
-    deliver: false,
-    idempotencyKey: uuid(),
-  });
-  if (!res?.runId) throw new Error("model-switch send returned no runId");
-  tab.silentRuns.add(res.runId);
-  tab.activeRunId = res.runId;
-  if (tab === currentTab()) updateSendButton();
-  await new Promise((resolve, reject) => {
-    tab.runCompletions.set(res.runId, { resolve, reject });
-  });
-  tab.lastSentModel = model;
+  // Hermes serves a single agent/model; there's no per-tab /model switch.
 }
 
 async function onSend() {
@@ -2390,19 +2181,13 @@ async function onSend() {
 async function sendWithCascade(tab, text, pendingId) {
   tab.cascadeAborted = false;  // reset at start of every send
   try {
-    await ensureModelSelected(tab);
-    const res = await rpc("chat.send", {
-      sessionKey: tab.sessionKey,
-      message: text,
-      thinking: state.thinking,
-      deliver: false,
-      idempotencyKey: uuid(),
-    });
-    if (!res?.runId) throw new Error("chat.send returned no runId");
-    tab.activeRunId = res.runId;
-    setPendingRunId(tab, pendingId, res.runId);
+    const runId = "run-" + uuid();
+    tab.activeRunId = runId;
+    setPendingRunId(tab, pendingId, runId);
     updateSendButton();
-    // handleChatEvent / handleAgentEvent own the rest of the run lifecycle.
+    // hermesSend streams the turn, driving handleChatEvent/handleAgentEvent for
+    // the full lifecycle (delta → tool cards → final), and resolves at stream end.
+    await hermesSend(tab, text, runId);
   } catch (e) {
     console.warn("[send] failed:", e.message);
     // User clicked Stop mid-send (abortAndClearLocally set the flag) — bail
@@ -2445,25 +2230,35 @@ function abortAndClearLocally(tab) {
   removePendingByRunId(tab, runId);
   resolveTabRunCompletion(tab, runId, "aborted");
   if (tab === currentTab()) updateSendButton();
-  rpc("chat.abort", { sessionKey: tab.sessionKey, runId })
-    .catch((e) => console.warn("chat.abort failed:", e.message));
+  // Abort the in-flight fetch; server.py sees the disconnect and closes its
+  // upstream socket to Hermes, which aborts the running turn.
+  try { tab.hermesAbort?.abort(); } catch {}
+  tab.hermesAbort = null;
+}
+
+// Rotate the session key to abandon the current server-side Hermes session and
+// start a fresh one. Strips any prior "#suffix" so repeated resets stay clean.
+function rotateSessionKey(key) {
+  return key.replace(/#[0-9a-f]+$/i, "") + "#" + shortHex(6);
 }
 
 async function resetTab(tab) {
   if (!tab) return;
-  if (!confirm(`Reset "${tab.displayName}"? Server transcript will be cleared.`)) return;
-  try {
-    await rpc("sessions.reset", { key: tab.sessionKey, reason: "reset" });
-    tab.runs.clear();
-    tab.activeRunId = null;
-    tab.historyLoaded = false;
-    tab.lastSentModel = null;
-    clearPendingForTab(tab);
-    updateSendButton();
-    await loadHistory(tab);
-  } catch (e) {
-    renderError("sessions.reset failed: " + e.message, tab);
-  }
+  if (!confirm(`Reset "${tab.displayName}"? This starts a fresh Hermes session — the agent forgets this conversation.`)) return;
+  try { tab.hermesAbort?.abort(); } catch {}
+  tab.hermesAbort = null;
+  clearCachedTurns(tab);
+  tab.sessionKey = rotateSessionKey(tab.sessionKey);
+  tab.runs.clear();
+  tab.activeRunId = null;
+  tab.historyLoaded = false;
+  tab.lastSentModel = null;
+  tab.modeApplied = false;
+  clearPendingForTab(tab);
+  saveTabs();
+  updateSendButton();
+  loadHistory(tab);
+  setStatus("ok", tab.sessionKey);
 }
 
 // ── Click anywhere to focus input ─────────────────────────────────────────
@@ -3181,34 +2976,20 @@ async function boot() {
       state.config = cfg;
     } catch {}
   }
-  if (!state.config?.wsUrl || !state.config?.token) {
-    try {
-      const resp = await fetch("/config");
-      const cfg = await resp.json();
-      state.config = state.config || {};
-      if (!state.config.wsUrl) state.config.wsUrl = cfg.wsUrl;
-      if (!state.config.token) state.config.token = cfg.token;
-      if (!state.config.bankrKey && cfg.bankrKey) state.config.bankrKey = cfg.bankrKey;
-      _ttsMode = (cfg.ttsBackend && cfg.ttsBackend !== "none") ? cfg.ttsBackend : "browser";
-      console.log("[tts] backend:", _ttsMode);
-      applyTtsState();
-    } catch (e) { console.warn("no /config endpoint", e); }
-  } else {
-    // We had cached config in localStorage; still ask the server whether OpenAI TTS is available.
-    try {
-      const resp = await fetch("/config");
-      const cfg = await resp.json();
-      _ttsMode = (cfg.ttsBackend && cfg.ttsBackend !== "none") ? cfg.ttsBackend : "browser";
-      console.log("[tts] backend:", _ttsMode);
-      applyTtsState();
-    } catch {}
-  }
-  if (!state.config?.wsUrl) state.config = { ...(state.config || {}), wsUrl: "ws://127.0.0.1:18789" };
-  if (!state.config.token) {
-    setStatus("bad", "no token — open settings");
-    openSettings();
-    return;
-  }
+  // Ask the server for backend config (Hermes status + TTS backend). The
+  // Hermes URL/key live server-side; the browser never sees them.
+  state.config = state.config || {};
+  try {
+    const resp = await fetch("/config");
+    const cfg = await resp.json();
+    if (!cfg.hermesConfigured) {
+      setStatus("bad", "Hermes not configured — set HERMES_BASE_URL/HERMES_API_KEY");
+      console.warn("[config] Hermes not configured on the server");
+    }
+    _ttsMode = (cfg.ttsBackend && cfg.ttsBackend !== "none") ? cfg.ttsBackend : "browser";
+    console.log("[tts] backend:", _ttsMode);
+    applyTtsState();
+  } catch (e) { console.warn("no /config endpoint", e); }
 
   // Initialize tabs (restore from storage or seed default)
   const restored = loadTabsFromStorage();

@@ -1,113 +1,122 @@
 # 🕸️ clawd-web
 
-A minimal browser chat UI that talks **directly** to your local OpenClaw
-gateway over its native WebSocket protocol — so the agent keeps its full
-memory, tools, and subagents, and you see every tool call stream live.
+A minimal browser chat UI that talks to a **Hermes agent** (Nous Research)
+over its OpenAI-compatible API server — so you get streaming replies and live
+tool-call cards, with the agent's full memory, tools, and skills running on the
+Hermes host.
+
+A small Python server (`server.py`) sits between the browser and Hermes. It
+holds the Hermes bearer key (which grants Hermes's **full toolset, including
+terminal access**), proxies the streaming chat endpoint, and serves the static
+UI. The key never reaches the browser.
 
 ## Setup
+
+### 1. Enable the API server on your Hermes box
+
+On the machine running Hermes, add to `~/.hermes/.env`:
+
+```bash
+API_SERVER_ENABLED=true
+API_SERVER_KEY=<a-strong-secret>
+# Bind so clawd-web's machine can reach it. localhost-only by default.
+API_SERVER_HOST=0.0.0.0          # or a specific/tailnet interface IP
+```
+
+Then start (or restart) the gateway so the API server comes up:
+
+```bash
+hermes gateway        # serves the OpenAI-compatible API on :8642 by default
+```
+
+> **Security:** the API key gives full agent/tool access (incl. running shell
+> commands) on the Hermes host. Prefer binding to a private interface — e.g. a
+> [Tailscale](https://tailscale.com) tailnet IP — rather than `0.0.0.0` on an
+> open LAN. clawd-web's own server binds to `127.0.0.1` only.
+
+### 2. Configure and run clawd-web
 
 ```bash
 git clone <this-repo>
 cd clawd-web
+cp .env.example .env
+# edit .env: set HERMES_BASE_URL + HERMES_API_KEY
 python3 server.py
 # Open http://127.0.0.1:7800 in your browser
 ```
 
-No pip dependencies. No build step. No API keys required — the token is
-auto-read from `~/.openclaw/openclaw.json`.
+No pip dependencies. No build step.
 
-## First-time gateway config
-
-clawd-web needs two one-time changes to `~/.openclaw/openclaw.json` and
-one CLI command so the gateway streams tool events. All local, no external
-services.
-
-**1. Allow the clawd-web origin** (required or WebSocket is rejected with 1008):
-
-```json5
-"gateway": {
-  "controlUi": {
-    "allowedOrigins": ["http://localhost:7800", "http://127.0.0.1:7800"]
-  }
-}
-```
-
-Restart the gateway after this.
-
-**2. Pair the device for admin scope** (first connect will create a pending
-request):
-
-```bash
-openclaw devices list          # grab the pending request id for "clawd-web"
-openclaw devices approve <id>  # one-time, remembered after
-```
-
-Admin scope is needed so clawd-web can bump the session's `verboseLevel`,
-which is what unlocks tool-call events in the live stream.
-
-## Configuration
-
-Defaults come from `~/.openclaw/openclaw.json`. Override via `.env` if you want:
-
-```bash
-cp .env.example .env
-# edit .env
-```
+## Configuration (`.env`)
 
 - `PORT` — the clawd-web server port (default `7800`)
-- `OPENCLAW_WS_URL` — override the WebSocket URL (default `ws://127.0.0.1:<port>`)
-- `OPENCLAW_TOKEN` — override the gateway auth token
-- `OPENCLAW_SESSION_KEY` — session to load (default `agent:clawd:main`)
-- `ELEVENLABS_API_KEY` — preferred TTS backend. Flash v2.5 model, ~200ms
-  TTFB, server streams audio bytes straight through to the browser as
-  they're generated. Default voice is Brian; override with
-  `ELEVENLABS_VOICE_ID` (any voice ID from the public library).
-- `OPENAI_API_KEY` — fallback TTS when no ElevenLabs key is set.
-  `gpt-4o-mini-tts` onyx voice with a craftsman-style delivery prompt
-  baked into `server.py`. Higher latency (~2s) but richer instruction
-  steering.
-- Without either key, the 🔊 toggle uses the browser's built-in
-  `speechSynthesis` voices. Selection is made server-side; the browser
-  always hits `/api/tts` and `/config` reports `ttsBackend`.
+- `HERMES_BASE_URL` — your Hermes API server, e.g. `https://hermes-host:8642`
+  (a trailing `/v1` or `/` is fine — it's normalized)
+- `HERMES_API_KEY` — the `API_SERVER_KEY` you set on the Hermes box
+- `HERMES_MODEL` — model id reported by `/v1/models` (default `hermes-agent`)
+- `HERMES_RESOLVE_IP` — *optional.* Pin the hostname to a fixed IP (e.g. a
+  Tailscale `100.x` address) when MagicDNS / system DNS can't resolve it. TLS
+  still validates against the hostname in `HERMES_BASE_URL`.
+- `BANKR_LLM_KEY` / `VENICE_API_KEY` / `ANTHROPIC_API_KEY` — cascade providers
+  for auto tab titles + filler stall-talk (see [Auxiliary cascade](#auxiliary-cascade))
+- `ELEVENLABS_API_KEY` — preferred TTS backend. Flash v2.5, ~200ms TTFB; server
+  streams audio straight through. Default voice is Brian; override with
+  `ELEVENLABS_VOICE_ID`.
+- `OPENAI_API_KEY` — fallback TTS (`gpt-4o-mini-tts`, onyx voice). Higher
+  latency (~2s) but richer instruction steering.
+- Without either TTS key, the 🔊 toggle uses the browser's built-in
+  `speechSynthesis` voices.
+
+### Verifying connectivity
+
+```bash
+curl -H "Authorization: Bearer $HERMES_API_KEY" $HERMES_BASE_URL/v1/models
+# → {"object":"list","data":[{"id":"hermes-agent",...}]}
+```
 
 ## Features
 
-- **Direct WebSocket** to the OpenClaw gateway (protocol v3)
-- **Ed25519 device identity** — keypair generated in-browser, persisted in localStorage
-- **Streaming text** as it's generated
-- **Live tool-call cards** — every bash/edit/fetch shows as a card (collapsible) with
-  the command in the header and DONE/ERROR status pill
-- **Inline thinking blocks** when the agent reasons (purple block)
-- **Session continuity** — close the tab, come back, full history loads
-- **Stop button** — abort a running turn via `chat.abort`
-- **Reset session** — `sessions.reset` + fresh transcript
+- **Streaming text** straight from Hermes `/v1/chat/completions` (SSE)
+- **Live tool-call cards** — Hermes `hermes.tool.progress` events render as cards
+  with the command label and a running/done status pill
+- **Session continuity** — each tab sends a stable `X-Hermes-Session-Key`, so the
+  agent keeps its memory per tab; the UI repaints from a local transcript cache
+- **Stop button** — aborts the in-flight request; the server closes its upstream
+  socket to Hermes, cancelling the run
+- **Reset** — rotates the tab's session key (fresh Hermes session) and clears the
+  local transcript
+- **Multi-tab** chats, each its own Hermes session
 
-## Protocol
+## How it works
 
-Uses OpenClaw gateway WebSocket v3:
+```
+browser ──HTTP/SSE──▶ server.py ──HTTPS/SSE──▶ Hermes API server
+  (UI)                (holds key,             (/v1/chat/completions,
+                       proxies, DNS pin)        runs the agent + tools)
+```
 
-- `connect` handshake with scopes `operator.read`, `operator.write`, `operator.admin`
-  and `caps: ["tool-events"]` (required to receive `agent stream=tool` frames)
-- `sessions.patch` on connect sets `verboseLevel: "on"` so tool events emit
-- `chat.history` on load (default limit 100)
-- `chat.send` with `idempotencyKey` for safe retries; returns `{ runId, status }`
-- `chat.abort { sessionKey, runId }` to stop a run
-- Subscribes to:
-  - `chat` events: `state: delta|final|aborted|error`, `message.content` as block array
-  - `agent` events: `stream: lifecycle | assistant | tool | thinking | reasoning`
+- `GET /config` — key-free: `{ backend, model, hermesConfigured, ttsBackend }`
+- `POST /api/hermes/chat` — `{ sessionKey, text }`; opens the Hermes SSE stream
+  with `Authorization: Bearer …` + `X-Hermes-Session-Key`, and pipes the
+  `chat.completion.chunk` + `hermes.tool.progress` events back to the browser
+- TTS endpoints (`/api/tts`) and the auxiliary cascade (`/api/autotitle`,
+  `/api/filler`) are unchanged
 
-Client id is `"openclaw-control-ui"` — `"webchat-ui"` is blocked from session
-patching by the gateway, even with admin scope.
+## Auxiliary cascade
+
+Tab auto-titles and "filler" stall-talk use a fallback cascade. Hermes is the
+primary tier for **titles** (with a tight timeout, then fast cloud fallback);
+**filler** stays on the fast cloud models because the full Hermes agent is too
+slow to fill a sub-second gap. Order: `hermes → bankr → venice → anthropic`.
+Each tier is skipped if its key isn't set.
 
 ## Debug mode
 
 Open `http://127.0.0.1:7800/?debug=1` to enable console logging and a
-`window.__eventLog` buffer of the last 500 chat+agent frames. Useful for
-protocol exploration without reading openclaw source.
+`window.__eventLog` buffer of the last 500 parsed SSE events.
 
 ## Voice
 
-Voice input/output isn't wired yet. This project mirrors the structure of
-[`clawd-voice-inline`](https://github.com/austintgriffith/clawd-voice-inline)
-so hold-to-talk → Whisper → `chat.send` → streamed reply → macOS `say` can
-drop in without restructuring.
+The hotkey daemon (`python3 hotkey.py`, needs `pip install pynput`) provides
+global hotkeys for mic toggle, view toggle, new tab, history reveal, speech
+mode, and panic-mute. See `hotkey.py` for the exact chords.

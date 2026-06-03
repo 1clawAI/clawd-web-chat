@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """
-clawd-web — browser chat UI that talks directly to the OpenClaw gateway.
+clawd-web — browser chat UI that talks to a Hermes agent over its
+OpenAI-compatible API server.
 
-The browser does all the WebSocket work. This Python server just serves
-the static HTML and exposes gateway config (URL + token + session key)
-via a /config endpoint so the browser knows where to connect.
+The browser drives the chat UI; this Python server proxies to Hermes so the
+bearer key (which grants Hermes's full toolset, incl. terminal) never reaches
+the browser, and so we sidestep Hermes's CORS-off API and any MagicDNS gaps.
+The browser hits /config (key-free) + /api/hermes/chat (SSE) + /api/* helpers.
 
 No pip deps, stdlib only.
 """
+import http.client
 import json
 import os
-import queue
+import socket
+import ssl
 import sys
+import queue
 import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn, TCPServer
+from urllib.parse import urlsplit
 
 
 class ThreadedHTTPServer(ThreadingMixIn, TCPServer):
@@ -57,18 +63,6 @@ def load_dotenv(path=".env"):
 load_dotenv()
 
 
-# ── Load gateway config from ~/.openclaw/openclaw.json ───────────────────────
-def load_openclaw_config():
-    path = Path(os.path.expanduser("~/.openclaw/openclaw.json"))
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text())
-    except Exception as e:
-        print(f"[warn] could not parse {path}: {e}")
-        return {}
-
-
 def tts_backend():
     """Pick the active TTS backend by env var availability."""
     if os.environ.get("ELEVENLABS_API_KEY"):
@@ -78,18 +72,72 @@ def tts_backend():
     return "none"
 
 
-def resolve_gateway_settings():
-    """Return {wsUrl, token, sessionKey, bankrKey, ttsBackend} — env vars override openclaw.json."""
-    cfg = load_openclaw_config()
-    gateway = cfg.get("gateway", {})
-    port = gateway.get("port", 18789)
-    token = (gateway.get("auth", {}) or {}).get("token", "")
+# ── Hermes agent (OpenAI-compatible API server) ─────────────────────────────
+# HERMES_BASE_URL may be given with or without a trailing "/v1" or "/"; we
+# normalize to a bare scheme://host[:port] root and build paths ourselves.
+def _normalize_base(url):
+    url = (url or "").strip().rstrip("/")
+    if url.endswith("/v1"):
+        url = url[:-3]
+    return url
 
+
+HERMES_BASE_URL = _normalize_base(os.environ.get("HERMES_BASE_URL", ""))
+HERMES_API_KEY = os.environ.get("HERMES_API_KEY", "")
+HERMES_MODEL = os.environ.get("HERMES_MODEL", "hermes-agent")
+# Optional: pin the hostname to a tailnet IP when MagicDNS isn't wired into the
+# OS resolver (common with open-source tailscaled on macOS). TLS still validates
+# against the real hostname — we only override which IP the socket connects to.
+HERMES_RESOLVE_IP = os.environ.get("HERMES_RESOLVE_IP", "").strip()
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS to a fixed IP while keeping SNI + cert validation on the hostname."""
+
+    def __init__(self, host, ip, **kw):
+        super().__init__(host, **kw)  # self.host = real hostname (SNI + Host header)
+        self._ip = ip
+
+    def connect(self):
+        sock = socket.create_connection((self._ip, self.port), self.timeout)
+        if self._tunnel_host:
+            self.sock = sock
+            self._tunnel()
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+def _hermes_request(method, path, body=None, extra_headers=None, timeout=120):
+    """Open a request to the Hermes API server. Returns (conn, response).
+
+    Caller must conn.close() when done. Body should be pre-encoded bytes.
+    """
+    if not HERMES_BASE_URL:
+        raise RuntimeError("HERMES_BASE_URL not configured")
+    sp = urlsplit(HERMES_BASE_URL)
+    host = sp.hostname
+    port = sp.port or (443 if sp.scheme == "https" else 80)
+    headers = {"Authorization": f"Bearer {HERMES_API_KEY}"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    if extra_headers:
+        headers.update(extra_headers)
+    if sp.scheme == "https":
+        if HERMES_RESOLVE_IP:
+            conn = _PinnedHTTPSConnection(host, HERMES_RESOLVE_IP, port=port, timeout=timeout)
+        else:
+            conn = http.client.HTTPSConnection(host, port, timeout=timeout)
+    else:
+        conn = http.client.HTTPConnection(HERMES_RESOLVE_IP or host, port, timeout=timeout)
+    conn.request(method, path, body=body, headers=headers)
+    return conn, conn.getresponse()
+
+
+def resolve_settings():
+    """Key-free config the browser is allowed to see."""
     return {
-        "wsUrl": os.environ.get("OPENCLAW_WS_URL") or f"ws://127.0.0.1:{port}",
-        "token": os.environ.get("OPENCLAW_TOKEN") or token,
-        "sessionKey": os.environ.get("OPENCLAW_SESSION_KEY") or "agent:clawd:main",
-        "bankrKey": os.environ.get("BANKR_LLM_KEY") or "",
+        "backend": "hermes",
+        "model": HERMES_MODEL,
+        "hermesConfigured": bool(HERMES_BASE_URL and HERMES_API_KEY),
         "ttsBackend": tts_backend(),
     }
 
@@ -131,19 +179,42 @@ def list_modes():
 
 
 def _llm_chat_with_fallback(messages, max_tokens, bankr_model, venice_model,
-                            anthropic_model, timeout=15, temperature=None):
-    """Three-tier cascade: bankr → venice → anthropic-direct.
+                            anthropic_model, timeout=15, temperature=None,
+                            hermes_model=None):
+    """Cascade: hermes (optional) → bankr → venice → anthropic-direct.
 
     Returns the assistant's raw content string. Each tier is skipped if its
     key isn't set. When a later tier is available, the earlier tier's timeout
     is capped so a hung provider can't burn the whole budget. Raises the last
     upstream exception if every available tier fails (or RuntimeError if none
     are configured).
+
+    Hermes runs the full agent (slow, heavy), so it's only used when a caller
+    opts in via `hermes_model` and always with a tight timeout — if it stalls
+    we fall through to the fast cloud tiers below.
     """
     bankr_key = os.environ.get("BANKR_LLM_KEY", "")
     venice_key = os.environ.get("VENICE_API_KEY", "")
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
     last_err = None
+
+    if hermes_model and HERMES_BASE_URL and HERMES_API_KEY:
+        try:
+            body_obj = {"model": hermes_model, "max_tokens": max_tokens, "messages": messages}
+            if temperature is not None:
+                body_obj["temperature"] = temperature
+            # Tight cap when a fast fallback exists — Hermes is the full agent.
+            ht = min(12, timeout) if (bankr_key or venice_key or anthropic_key) else timeout
+            conn, resp = _hermes_request(
+                "POST", "/v1/chat/completions",
+                body=json.dumps(body_obj).encode(), timeout=ht,
+            )
+            try:
+                return json.loads(resp.read())["choices"][0]["message"]["content"]
+            finally:
+                conn.close()
+        except Exception as e:
+            last_err = e
 
     if bankr_key:
         try:
@@ -234,9 +305,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self.serve_file("index.html", "text/html; charset=utf-8")
         elif path == "/config":
-            cfg = resolve_gateway_settings()
-            cfg.pop("bankrKey", None)  # keep API key server-side only
-            self.send_json(cfg)
+            self.send_json(resolve_settings())
         elif path == "/health":
             self.send_json({"status": "ok"})
         elif path == "/api/modes":
@@ -282,7 +351,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
-        if path == "/api/autotitle":
+        if path == "/api/hermes/chat":
+            self.handle_hermes_chat()
+        elif path == "/api/autotitle":
             self.handle_autotitle()
         elif path == "/api/filler":
             self.handle_filler()
@@ -321,9 +392,93 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def handle_hermes_chat(self):
+        """Proxy a streaming chat turn to Hermes /v1/chat/completions.
+
+        Body: {sessionKey, text}. The bearer key + DNS pinning stay here;
+        the browser receives Hermes's SSE stream verbatim (chat.completion.chunk
+        + hermes.tool.progress events) and parses it client-side.
+
+        Continuity is server-side in Hermes, keyed by X-Hermes-Session-Key, so
+        we only forward the single new user turn. If the browser disconnects
+        (Stop button), the upstream socket closes, which aborts the Hermes run.
+        """
+        if not (HERMES_BASE_URL and HERMES_API_KEY):
+            self.send_json({"error": "HERMES_BASE_URL / HERMES_API_KEY not configured"}, status=503)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            req_body = json.loads(self.rfile.read(length)) if length else {}
+        except Exception as e:
+            self.send_json({"error": f"bad request body: {e}"}, status=400)
+            return
+        session_key = (req_body.get("sessionKey") or "").strip()
+        text = req_body.get("text") or ""
+        if not text:
+            self.send_json({"error": "missing text"}, status=400)
+            return
+
+        upstream_body = json.dumps({
+            "model": HERMES_MODEL,
+            "stream": True,
+            "messages": [{"role": "user", "content": text}],
+        }).encode()
+        extra = {"Accept": "text/event-stream"}
+        if session_key:
+            extra["X-Hermes-Session-Key"] = session_key
+
+        conn = resp = None
+        try:
+            conn, resp = _hermes_request(
+                "POST", "/v1/chat/completions",
+                body=upstream_body, extra_headers=extra, timeout=600,
+            )
+        except Exception as e:
+            self.send_json({"error": f"hermes connect failed: {e}"}, status=502)
+            if conn:
+                conn.close()
+            return
+
+        if resp.status != 200:
+            detail = b""
+            try:
+                detail = resp.read()[:500]
+            except Exception:
+                pass
+            self.send_json(
+                {"error": f"hermes returned {resp.status}", "detail": detail.decode("utf-8", "replace")},
+                status=502,
+            )
+            conn.close()
+            return
+
+        # Stream the SSE through. HTTP/1.0 + connection-close framing lets us
+        # write unbounded bytes without chunked encoding (mirrors handle_tts).
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            while True:
+                chunk = resp.read(512)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            # Browser hit Stop / navigated away — closing the upstream conn
+            # below severs the socket to Hermes, aborting the in-flight run.
+            pass
+        except Exception as e:
+            print(f"[hermes] stream error: {e}")
+        finally:
+            conn.close()
+
     def handle_autotitle(self):
-        if not (os.environ.get("BANKR_LLM_KEY") or os.environ.get("VENICE_API_KEY")
-                or os.environ.get("ANTHROPIC_API_KEY")):
+        if not ((HERMES_BASE_URL and HERMES_API_KEY) or os.environ.get("BANKR_LLM_KEY")
+                or os.environ.get("VENICE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")):
             self.send_json({"error": "no LLM provider configured"}, status=503)
             return
         try:
@@ -336,6 +491,7 @@ class Handler(BaseHTTPRequestHandler):
             raw = _llm_chat_with_fallback(
                 full_messages,
                 max_tokens=200,
+                hermes_model=HERMES_MODEL,
                 bankr_model="minimax-m2.7",
                 venice_model="minimax-m27",
                 anthropic_model="claude-haiku-4-5",
@@ -596,38 +752,16 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def check_allowed_origins(port):
-    """Warn if the gateway isn't configured to accept our origin."""
-    cfg = load_openclaw_config()
-    allowed = (((cfg.get("gateway") or {}).get("controlUi") or {}).get("allowedOrigins") or [])
-    needed = [f"http://localhost:{port}", f"http://127.0.0.1:{port}"]
-    missing = [o for o in needed if o not in allowed]
-    if not missing:
-        return
-    print()
-    print("⚠  gateway.controlUi.allowedOrigins is missing our origin.")
-    print("   The openclaw gateway will reject our WebSocket unless you add:")
-    print()
-    print("     \"gateway\": {")
-    print("       \"controlUi\": {")
-    print(f"         \"allowedOrigins\": {json.dumps(needed)}")
-    print("       }")
-    print("     }")
-    print()
-    print("   Then restart the gateway. (See README for details.)")
-    print()
-
-
 if __name__ == "__main__":
-    settings = resolve_gateway_settings()
     print(f"🕸️  clawd-web → http://127.0.0.1:{PORT}")
-    print(f"   gateway   → {settings['wsUrl']}")
-    print(f"   session   → {settings['sessionKey']}")
-    print(f"   token     → {'set' if settings['token'] else 'MISSING — check ~/.openclaw/openclaw.json'}")
-    if not settings["token"]:
-        print("[warn] no gateway token found — the UI will prompt you to paste one")
+    print(f"   hermes    → {HERMES_BASE_URL or 'MISSING — set HERMES_BASE_URL'}"
+          + (f"  (pinned → {HERMES_RESOLVE_IP})" if HERMES_RESOLVE_IP else ""))
+    print(f"   model     → {HERMES_MODEL}")
+    print(f"   key       → {'set' if HERMES_API_KEY else 'MISSING — set HERMES_API_KEY'}")
+    print(f"   tts       → {tts_backend()}")
+    if not (HERMES_BASE_URL and HERMES_API_KEY):
+        print("[warn] Hermes not fully configured — set HERMES_BASE_URL and HERMES_API_KEY (see .env.example)")
     print("   hotkey    → run `python3 hotkey.py` in a separate terminal for Ctrl+.")
-    check_allowed_origins(PORT)
     try:
         ThreadedHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
     except KeyboardInterrupt:
