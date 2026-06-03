@@ -2,8 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <title>🕸️ clawd-web</title>
+<!-- PWA -->
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#1e0a0a" />
+<link rel="apple-touch-icon" href="/clawdassets/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="clawd" />
 <style>
   :root {
     --bg:  #1e0a0a;
@@ -559,6 +567,12 @@ const clawdVid = (() => {
   const RARE_SMOKING = "clawdassets/idle-smoking.mp4";
   const RARE_COFFEE  = "clawdassets/idle-sipping-coffee.mp4";
   const RARE_MASK    = "clawdassets/idle-guy-fawkes-mask.mp4";
+  // Funny rare idles — picked occasionally for personality.
+  const FUNNY = [
+    "clawdassets/idle-deal-with-it.mp4",
+    "clawdassets/idle-evil-laugh.mp4",
+    "clawdassets/idle-finger-guns.mp4",
+  ];
   const CHAT_DEFAULT = "clawdassets/chatting_1.mp4";
   const CHAT_SHORT   = "clawdassets/short-subtle-talking.mp4";
   const CHAT_DRUNK   = "clawdassets/talking-lil-drunk.mp4";
@@ -613,6 +627,7 @@ const clawdVid = (() => {
     if (r < 0.02)  return RARE_MASK;          // ~1.5% — puts on the mask
     if (r < 0.04)  return RARE_SMOKING;       // ~2%
     if (r < 0.09)  return RARE_COFFEE;        // ~5% — occasional coffee sip
+    if (r < 0.16)  return FUNNY[Math.floor(Math.random() * FUNNY.length)];  // ~7% — funny bit
     return IDLES[Math.floor(Math.random() * IDLES.length)];
   }
 
@@ -3027,6 +3042,15 @@ async function boot() {
 
 window.__clawdState = state;
 boot();
+
+// PWA: register the service worker (installable + offline shell). Requires a
+// secure context — works on localhost and over HTTPS (e.g. Tailscale serve);
+// silently skipped on plain-HTTP LAN access.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch((e) => console.warn("[pwa] SW registration failed:", e));
+  });
+}
 </script>
 </body>
 </html>

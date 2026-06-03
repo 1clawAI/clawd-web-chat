@@ -307,6 +307,11 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             self.serve_file("index.html", "text/html; charset=utf-8")
+        elif path == "/manifest.webmanifest":
+            self.serve_file("manifest.webmanifest", "application/manifest+json")
+        elif path == "/sw.js":
+            # Served from root so the worker's scope covers the whole app.
+            self.serve_file("sw.js", "text/javascript", extra_headers={"Service-Worker-Allowed": "/"})
         elif path == "/config":
             self.send_json(resolve_settings())
         elif path == "/health":
@@ -733,7 +738,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
-    def serve_file(self, name, content_type):
+    def serve_file(self, name, content_type, extra_headers=None):
         path = Path(__file__).parent / name
         if not path.exists():
             self.send_error(404)
@@ -743,6 +748,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 

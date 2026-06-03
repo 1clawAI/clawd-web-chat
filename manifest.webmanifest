@@ -1,0 +1,16 @@
+{
+  "name": "clawd-web",
+  "short_name": "clawd",
+  "description": "Browser chat UI for a Hermes agent — streaming replies + live tool-call cards.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#1e0a0a",
+  "theme_color": "#1e0a0a",
+  "icons": [
+    { "src": "/clawdassets/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/clawdassets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/clawdassets/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
