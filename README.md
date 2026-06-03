@@ -10,6 +10,9 @@ holds the Hermes bearer key (which grants Hermes's **full toolset, including
 terminal access**), proxies the streaming chat endpoint, and serves the static
 UI. The key never reaches the browser.
 
+> Independent community UI — not affiliated with or endorsed by Nous Research.
+> "Hermes" refers to the [Hermes agent](https://hermes-agent.nousresearch.com).
+
 ## Setup
 
 ### 1. Enable the API server on your Hermes box
@@ -37,10 +40,10 @@ hermes gateway        # serves the OpenAI-compatible API on :8642 by default
 ### 2. Configure and run clawd-web
 
 ```bash
-git clone <this-repo>
-cd clawd-web
+git clone https://github.com/1clawAI/clawd-web-chat.git
+cd clawd-web-chat
 cp .env.example .env
-# edit .env: set HERMES_BASE_URL + HERMES_API_KEY
+# edit .env: set HERMES_BASE_URL + HERMES_API_KEY (never commit .env)
 python3 server.py
 # Open http://127.0.0.1:7800 in your browser
 ```
