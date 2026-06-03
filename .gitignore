@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 modes/
 clawdassets/*.mp4
+
+# Veo generation temp artifacts
+clawdassets/.ref_*
+clawdassets/.raw_*

@@ -557,6 +557,8 @@ const clawdVid = (() => {
   ];
   const RARE_BURGER  = "clawdassets/idle-rare-eats-a-burger.mp4";
   const RARE_SMOKING = "clawdassets/idle-smoking.mp4";
+  const RARE_COFFEE  = "clawdassets/idle-sipping-coffee.mp4";
+  const RARE_MASK    = "clawdassets/idle-guy-fawkes-mask.mp4";
   const CHAT_DEFAULT = "clawdassets/chatting_1.mp4";
   const CHAT_SHORT   = "clawdassets/short-subtle-talking.mp4";
   const CHAT_DRUNK   = "clawdassets/talking-lil-drunk.mp4";
@@ -607,28 +609,25 @@ const clawdVid = (() => {
 
   function nextIdle() {
     const r = Math.random();
-    if (r < 0.005) return RARE_BURGER;        // ~1 in 200
-    if (r < 0.02)  return RARE_SMOKING;       // ~1.5%
+    if (r < 0.005) return RARE_BURGER;        // ~0.5%
+    if (r < 0.02)  return RARE_MASK;          // ~1.5% — puts on the mask
+    if (r < 0.04)  return RARE_SMOKING;       // ~2%
+    if (r < 0.09)  return RARE_COFFEE;        // ~5% — occasional coffee sip
     return IDLES[Math.floor(Math.random() * IDLES.length)];
   }
 
+  // NOTE: right now only CHAT_DEFAULT (chatting_1.mp4) is a real animated
+  // talking clip — the other CHAT_* files are still static stopgaps that read
+  // as idle. So route ALL talking to CHAT_DEFAULT: the mouth actually moves,
+  // and because chat clips don't loop, onEnded re-picks this same clip while
+  // TTS is still playing → a continuous talking loop for the whole response.
+  // Restore the contextual variety (hello/short/explain/satisfied) once those
+  // clips are regenerated via tools/gen_avatar_veo.py.
   function nextChat(text, opts) {
-    opts = opts || {};
-    const t = (text || "").trim();
-    if (opts.satisfied) return CHAT_SATISFIED;
-    if (opts.firstEver) return FIRST_HELLO;
-    if (/^(hi|hello|hey|howdy|sup|yo|hiya|greetings)\b/i.test(t)) return CHAT_HELLO;
-    if (t.length > 0 && t.length < 40) return CHAT_SHORT;
-    if (t.length > 200) return Math.random() < 0.5 ? CHAT_EXPLAIN_HANDS : CHAT_EXPLAIN;
     return CHAT_DEFAULT;
   }
-
-  // Pool used when a chat clip ends mid-TTS — picks a generic talking
-  // variant so the mouth keeps moving. Excludes greeting/satisfied clips
-  // which are reserved for openers via nextChat().
-  const CHAT_LOOP_POOL = [CHAT_DEFAULT, CHAT_SHORT, CHAT_DRUNK, CHAT_EXPLAIN_HANDS, CHAT_EXPLAIN];
   function nextChatVariant() {
-    return CHAT_LOOP_POOL[Math.floor(Math.random() * CHAT_LOOP_POOL.length)];
+    return CHAT_DEFAULT;
   }
 
   // Wrap each primary video and add an overlay layer for cross-fade.
