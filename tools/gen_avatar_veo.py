@@ -34,7 +34,7 @@ CLIPS = {
     # idle
     "idle.mp4": ("Subtle idle: slow breathing, one lazy blink, neon glow shimmering. Almost still. MOUTH CLOSED and still the whole time — he is NOT talking, no lip or jaw movement.", 5),
     "idle_1.mp4": ("Lifts a sleek vape pen to his mouth in one claw, takes a slow drag, lowers it, and exhales a thin curl of neon-lit vapor, unbothered and cool. A clear vaping action — not talking.", 6),
-    "idle_2.mp4": ("ONE big exaggerated sleepy yawn and nothing else: head tilts back slightly, eyes squeeze tightly shut, and his mouth stretches WIDE open in a single long slow yawn — obviously a yawn, held for a beat — then his mouth closes completely and he gives one slow drowsy blink. Just that one yawn; the mouth does NOT flutter or move repeatedly; he is NOT talking, NOT smiling, NOT laughing.", 5),
+    "idle_2.mp4": ("Calm thinking pose: he rests one claw thoughtfully against the side of his chin, eyes drift slowly upward as if pondering, then a single slow blink. Extremely subtle, almost perfectly still. His MOUTH stays firmly closed and motionless the entire time — no lip or jaw movement, not talking. Locked, fixed, tripod camera — no zoom, no push-in, no pan.", 5),
     "idle_lookaround.mp4": ("Eyes glance left, then right, scanning, then back to camera. MOUTH CLOSED and still the whole time — he is NOT talking, no lip movement; only the eyes move.", 5),
     "idle-smoking.mp4": ("Takes a slow drag from a thin vape, exhales a curl of neon-lit smoke, unbothered.", 6),
     "idle-rare-eats-a-burger.mp4": ("Casually takes a bite of a cheeseburger held in a claw, chews, satisfied nod.", 6),
@@ -124,7 +124,7 @@ def neg_for(name):
     if name.startswith(("chatting", "talking", "short-subtle", "saying-hello", "explaining")):
         return _NEG_ZOOM
     # Purposeful mouth/hand actions: forbid talking + camera, allow the action.
-    if name in ("idle_1.mp4", "idle_2.mp4", "idle-sipping-coffee.mp4", "idle-smoking.mp4",
+    if name in ("idle_1.mp4", "idle-sipping-coffee.mp4", "idle-smoking.mp4",
                 "idle-rare-eats-a-burger.mp4", "idle-guy-fawkes-mask.mp4",
                 "idle-deal-with-it.mp4", "idle-evil-laugh.mp4", "idle-finger-guns.mp4"):
         return _NEG_ACTION

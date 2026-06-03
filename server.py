@@ -85,6 +85,23 @@ def _normalize_base(url):
 HERMES_BASE_URL = _normalize_base(os.environ.get("HERMES_BASE_URL", ""))
 HERMES_API_KEY = os.environ.get("HERMES_API_KEY", "")
 HERMES_MODEL = os.environ.get("HERMES_MODEL", "hermes-agent")
+# Optional personality nudge prepended as a system message on the main chat.
+# Keeps answers helpful but lets a little dry wit surface now and then. Set
+# HERMES_PERSONA="" to disable.
+_DEFAULT_PERSONA = (
+    "You have a dry, understated sense of humor. Occasionally — only when it "
+    "fits naturally — slip in a subtle witty aside or a light, deadpan joke to "
+    "show personality. Keep it brief and never at the expense of being genuinely "
+    "helpful, accurate, or clear. Most of the time just answer well; let the "
+    "humor surface sparingly, maybe one response in three.\n\n"
+    "Your replies are read aloud by a text-to-speech voice, so write them to be "
+    "heard, not just read: use complete, clearly punctuated sentences with commas "
+    "and periods for natural pauses, keep a relaxed conversational rhythm, and "
+    "avoid dense run-on sentences, long lists, or walls of symbols. When you must "
+    "include code or commands for the screen, still give a plain, spoken-friendly "
+    "sentence explaining them."
+)
+HERMES_PERSONA = os.environ.get("HERMES_PERSONA", _DEFAULT_PERSONA)
 # Optional: pin the hostname to a tailnet IP when MagicDNS isn't wired into the
 # OS resolver (common with open-source tailscaled on macOS). TLS still validates
 # against the real hostname — we only override which IP the socket connects to.
@@ -426,10 +443,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "missing text"}, status=400)
             return
 
+        msgs = []
+        if HERMES_PERSONA:
+            msgs.append({"role": "system", "content": HERMES_PERSONA})
+        msgs.append({"role": "user", "content": text})
         upstream_body = json.dumps({
             "model": HERMES_MODEL,
             "stream": True,
-            "messages": [{"role": "user", "content": text}],
+            "messages": msgs,
         }).encode()
         extra = {"Accept": "text/event-stream"}
         if session_key:
@@ -669,12 +690,13 @@ class Handler(BaseHTTPRequestHandler):
             "text": text,
             "model_id": "eleven_flash_v2_5",
             # Tuned for a chill, relaxed delivery: lower stability lets the voice
-            # breathe and stay loose; speed pulled back to ~1.0 so it's unhurried.
+            # breathe and stay loose; speed pulled back below 1.0 so it reads
+            # unhurried (it sometimes felt rushed at 1.0).
             "voice_settings": {
                 "stability": 0.45,
                 "similarity_boost": 0.6,
                 "use_speaker_boost": True,
-                "speed": 1.0,
+                "speed": 0.9,
             },
         }).encode()
         req = urllib.request.Request(
