@@ -144,10 +144,13 @@ def resolve_settings():
 
 # Steers the gpt-4o-mini-tts delivery — see /api/tts.
 TTS_INSTRUCTIONS = (
-    "Speak like a seasoned craftsman sharing hard-won wisdom. Unhurried. "
-    "Warm. The kind of gravelly voice that comes from decades of real work. "
-    "Confident because you've seen it all. Not corporate. Not polished. "
-    "Just real. A guy you'd trust to build your house."
+    "Speak with a German accent — a witty cypherpunk hacker who finds the "
+    "whole system mildly hilarious. Deep and relaxed, dry deadpan delivery "
+    "with sly comic timing and the faint smirk of someone who encrypts for "
+    "sport. Crisp German consonants, slightly clipped vowels, unhurried "
+    "pacing. Unbothered and a little smug — like you already owned the box "
+    "and are just narrating it for fun. Never excitable; the humor is in the "
+    "calm."
 )
 
 
@@ -660,11 +663,13 @@ class Handler(BaseHTTPRequestHandler):
         req_body = json.dumps({
             "text": text,
             "model_id": "eleven_flash_v2_5",
+            # Tuned for a chill, relaxed delivery: lower stability lets the voice
+            # breathe and stay loose; speed pulled back to ~1.0 so it's unhurried.
             "voice_settings": {
-                "stability": 0.65,
-                "similarity_boost": 0.5,
+                "stability": 0.45,
+                "similarity_boost": 0.6,
                 "use_speaker_boost": True,
-                "speed": 1.2,
+                "speed": 1.0,
             },
         }).encode()
         req = urllib.request.Request(
