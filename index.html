@@ -316,6 +316,12 @@
   .msg.user { background: #2e0909; border-color: #5a1515; }
   .msg.assistant { background: var(--bg2); border-color: var(--border); overflow: hidden; }
   .msg.assistant::after { content: ""; display: table; clear: both; }
+  .replay-btn {
+    margin-top: 6px; padding: 2px 8px; font-size: 12px; line-height: 1.4;
+    background: var(--bg3); color: var(--fg2); border: 1px solid var(--border);
+    border-radius: 999px; cursor: pointer; opacity: 0.6; transition: opacity 0.15s;
+  }
+  .replay-btn:hover { opacity: 1; color: var(--fg); }
   .msg.system { font-size: 11px; color: var(--fg3); background: var(--bg); }
   .msg.error { background: var(--error); border-color: var(--error-border); }
   .msg.error .role { color: #ff9e9e; }
@@ -1668,6 +1674,7 @@ function handleChatEvent(payload) {
   if (chatState === "final") {
     if (t.tickerId) clearInterval(t.tickerId);
     t.footerEl.innerHTML = "";
+    addReplayButton(t.container);   // per-response replay (↻) control
     if (tab.activeRunId === runId) tab.activeRunId = null;
     removePendingByRunId(tab, runId);
     resolveTabRunCompletion(tab, runId, null);
@@ -2051,6 +2058,7 @@ function loadHistory(tab) {
       const container = renderAssistantContainer(tab);
       const textEl = container.querySelector(".text");
       if (textEl && m.text) textEl.innerHTML = renderText(m.text);
+      addReplayButton(container);   // replay (↻) on restored responses too
     }
   }
 
@@ -2153,18 +2161,13 @@ async function onSend() {
   // lift any panic-stop mute so this turn speaks normally.
   _ttsMuted = false;
   ttsReset();
-  // Fire Haiku stall-talk in parallel with the real RPC so the user hears
-  // an ack within ~1s instead of waiting for the main model's first token.
-  // Opening the ack window buffers any real text deltas that arrive before
-  // the ack response — guarantees ack speaks first. Skip entirely for short
-  // messages and bare greetings — the real reply is faster than the stall.
+  // Play an instant canned acknowledgement so there's no dead air while the
+  // agent thinks. It's enqueued ahead of the real answer and auto-dropped the
+  // moment real audio starts. No LLM / no key. Skip for short messages and
+  // bare greetings — the real reply lands faster than the stall would.
   if (_ttsEnabled && !shouldSkipAck(userText)) {
     openAckWindow();
-    fillerSpeak({
-      kind: "ack",
-      lastUser: userText,
-      history: fillerHistorySnapshot(tab, 3),
-    });
+    ackSpeak();
   }
 
   scrollToBottom(true);
@@ -2520,6 +2523,53 @@ function ttsPlayBlob(blob, kind, subtitleText) {
   });
 }
 
+// Replay the spoken audio for one response on demand (per-message ↻ button).
+// Independent of the streaming queue / 🔊 toggle — always plays when clicked.
+async function replayText(raw) {
+  const text = ttsStrip(raw || "").slice(0, 4000);
+  if (!text) return;
+  if (_ttsMode === "browser") {
+    try {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.1;
+      u.onstart = () => clawdVid.chatting(text);
+      u.onend = () => { _ttsIdleTimer = setTimeout(() => clawdVid.idle(true), 80); };
+      speechSynthesis.speak(u);
+    } catch {}
+    return;
+  }
+  ttsReset();          // stop anything currently playing / queued
+  _ttsMuted = false;
+  try {
+    const res = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) return;
+    _ttsTurnFullText = text;          // so the talking clip plays during replay
+    await ttsPlayBlob(await res.blob(), "real");
+    _ttsIdleTimer = setTimeout(() => { if (!_ttsAudio) clawdVid.idle(true); }, 80);
+  } catch (e) { console.warn("[tts] replay failed:", e.message); }
+}
+
+// Attach a small replay (↻) control to an assistant turn/message container.
+function addReplayButton(container) {
+  if (!container || container.querySelector(".replay-btn")) return;
+  const btn = document.createElement("button");
+  btn.className = "replay-btn";
+  btn.type = "button";
+  btn.title = "Replay audio";
+  btn.textContent = "🔊";
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const txt = container.querySelector(".text")?.textContent || "";
+    replayText(txt);
+  });
+  container.appendChild(btn);
+}
+
 async function ttsDrainQueue() {
   if (_ttsDraining) return;     // a drain loop is already running — it'll pick up new items
   _ttsDraining = true;
@@ -2619,6 +2669,37 @@ function ackTrace(...args) {
   if (!window.__clawdDebug) return;
   const dt = _ackTraceStart ? `+${Date.now() - _ackTraceStart}ms` : "0ms";
   console.log(`%c[clawd-ack ${dt}]`, "color:#ff8855;font-weight:bold", ...args);
+}
+
+// Instant canned acknowledgement to mask the agent's "thinking" gap — no LLM,
+// no key. Plays the moment you hit send; auto-dropped once the real answer's
+// audio starts (the "ack" kind is gated on _ttsRealAudioStarted downstream).
+const ACK_PHRASES = [
+  "one sec…", "let me check…", "hold on…", "okay, looking…", "on it…",
+  "let me see…", "give me a moment…", "checking now…", "alright, one moment…",
+  "hmm, let me look…", "right, looking into it…",
+];
+function pickAck() { return ACK_PHRASES[Math.floor(Math.random() * ACK_PHRASES.length)]; }
+
+async function ackSpeak() {
+  ackTrace("ackSpeak ENTER", { ttsEnabled: _ttsEnabled, ttsMode: _ttsMode, realAudioStarted: _ttsRealAudioStarted });
+  if (!_ttsEnabled || _ttsMuted) { closeAckWindow("ack-disabled"); return; }
+  if (_ttsRealAudioStarted) { closeAckWindow("ack-skip-realstarted"); return; }
+  const phrase = pickAck();
+  if (_ttsMode === "browser") {
+    try {
+      const u = new SpeechSynthesisUtterance(phrase.replace(/…/g, ""));
+      u.rate = 1.15; u.onstart = () => clawdVid.chatting(phrase);
+      speechSynthesis.speak(u);
+    } catch {}
+    closeAckWindow("ack-browser");
+    return;
+  }
+  try {
+    ttsEnqueue(phrase, "ack");   // fetches the blob + drains; unshifted to front
+  } finally {
+    closeAckWindow("ack-settled");
+  }
 }
 
 async function fillerSpeak({ kind, lastUser, toolName, toolInput, thinkingText, history }) {
@@ -2850,6 +2931,23 @@ let _recog = null;
 let _recording = false;
 let _cancelSend = false;
 
+// Chrome's speech engine can't be trained, so fix known brand mishearings in
+// the transcript before it's sent. "1Claw" is heard as "1:00", "one o'clock",
+// "one claw", etc. Extend BRAND_FIXES for other show terms (Hermes, HSM, …).
+const BRAND_FIXES = [
+  [/\b1\s*[:.\-]\s*00\b/gi, "1Claw"],              // "1:00", "1.00", "1-00"
+  [/\b(?:one|won|juan|1)\s*o['’`]?\s*clock\b/gi, "1Claw"],  // "one o'clock"
+  [/\b(?:one|won|juan|1)[\s\-]*claws?\b/gi, "1Claw"],       // "one claw", "1 claw"
+  [/\b(?:one|won)[\s\-]*(?:claude|clawed|claus)\b/gi, "1Claw"],
+  [/\bone[\s\-]*claw['’`]?s?\b/gi, "1Claw"],
+  [/\boneclaw\b/gi, "1Claw"],
+];
+function fixTranscript(text) {
+  let out = text || "";
+  for (const [re, rep] of BRAND_FIXES) out = out.replace(re, rep);
+  return out;
+}
+
 function startRecording() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) { renderError("Speech recognition not supported — needs Chrome/Edge."); return; }
@@ -2880,7 +2978,7 @@ function startRecording() {
       if (e.results[i].isFinal) sessionFinal += e.results[i][0].transcript;
       else interim += e.results[i][0].transcript;
     }
-    $input.value = (baseText ? baseText + " " : "") + sessionFinal + interim;
+    $input.value = (baseText ? baseText + " " : "") + fixTranscript(sessionFinal + interim);
     autosize($input);
     resetSilenceTimer();
   };

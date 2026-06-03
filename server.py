@@ -99,7 +99,10 @@ _DEFAULT_PERSONA = (
     "and periods for natural pauses, keep a relaxed conversational rhythm, and "
     "avoid dense run-on sentences, long lists, or walls of symbols. When you must "
     "include code or commands for the screen, still give a plain, spoken-friendly "
-    "sentence explaining them."
+    "sentence explaining them.\n\n"
+    "Keep replies concise and punchy — usually two to four sentences. Get to the "
+    "point fast and lead with the answer; only go longer when the user explicitly "
+    "asks for depth or the topic truly needs it."
 )
 HERMES_PERSONA = os.environ.get("HERMES_PERSONA", _DEFAULT_PERSONA)
 # Optional: pin the hostname to a tailnet IP when MagicDNS isn't wired into the
@@ -684,7 +687,7 @@ class Handler(BaseHTTPRequestHandler):
         voice_id = os.environ.get("ELEVENLABS_VOICE_ID") or "nPczCjzI2devNBz1zQrb"  # Brian
         url = (
             f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
-            "?optimize_streaming_latency=3&output_format=mp3_44100_64"
+            "?optimize_streaming_latency=4&output_format=mp3_44100_64"
         )
         req_body = json.dumps({
             "text": text,
