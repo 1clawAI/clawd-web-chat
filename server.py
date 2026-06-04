@@ -10,12 +10,16 @@ The browser hits /config (key-free) + /api/hermes/chat (SSE) + /api/* helpers.
 
 No pip deps, stdlib only.
 """
+import csv
 import http.client
+import io
 import json
 import os
+import re
 import socket
 import ssl
 import sys
+import time
 import queue
 import threading
 import urllib.error
@@ -89,11 +93,12 @@ HERMES_MODEL = os.environ.get("HERMES_MODEL", "hermes-agent")
 # Keeps answers helpful but lets a little dry wit surface now and then. Set
 # HERMES_PERSONA="" to disable.
 _DEFAULT_PERSONA = (
-    "You have a dry, understated sense of humor. Occasionally — only when it "
-    "fits naturally — slip in a subtle witty aside or a light, deadpan joke to "
-    "show personality. Keep it brief and never at the expense of being genuinely "
-    "helpful, accurate, or clear. Most of the time just answer well; let the "
-    "humor surface sparingly, maybe one response in three.\n\n"
+    "You're sharp and genuinely helpful, but you don't take yourself too "
+    "seriously. Crack an actual joke or a playful quip fairly often — roughly "
+    "every other response — while keeping the substance rock-solid and accurate. "
+    "Land the real answer first, then have a little fun with it: a witty aside, a "
+    "dry one-liner, a bit of deadpan. Keep jokes short, and never let them muddy "
+    "or replace the real information. Serious when it counts, funny when it can.\n\n"
     "Your replies are read aloud by a text-to-speech voice, so write them to be "
     "heard, not just read: use complete, clearly punctuated sentences with commas "
     "and periods for natural pauses, keep a relaxed conversational rhythm, and "
@@ -105,6 +110,57 @@ _DEFAULT_PERSONA = (
     "asks for depth or the topic truly needs it."
 )
 HERMES_PERSONA = os.environ.get("HERMES_PERSONA", _DEFAULT_PERSONA)
+
+# ── "What's new with 1Claw?" — inject the team's tracker (Google Sheet CSV) ──
+# Keep the URL in .env (it's an internal tracker), not committed. Publish the
+# sheet to web / share "anyone with link" and use the CSV export URL:
+#   https://docs.google.com/spreadsheets/d/<ID>/export?format=csv
+ONECLAW_SHEET_CSV_URL = os.environ.get("ONECLAW_SHEET_CSV_URL", "")
+_ONECLAW_CACHE = {"t": 0.0, "text": ""}
+_ONECLAW_TTL = 120  # seconds — cache the sheet so we don't refetch every message
+_BRAND_RE = re.compile(r"1\s*claw|one\s*claw", re.I)
+_RECENCY_RE = re.compile(r"\bnew\b|latest|recent|update|shipped|ship(ping)?|working on|news|launch|lately|up to", re.I)
+
+
+def _is_whats_new(text):
+    """True when the message is asking what's new / recent with 1Claw."""
+    return bool(_BRAND_RE.search(text) and _RECENCY_RE.search(text))
+
+
+def _oneclaw_recent_context(limit=6):
+    """Fetch the tracker sheet, return the newest `limit` items as a context
+    block (sorted by Date desc — the sheet isn't kept in order). Cached."""
+    if not ONECLAW_SHEET_CSV_URL:
+        return ""
+    now = time.time()
+    if _ONECLAW_CACHE["text"] and now - _ONECLAW_CACHE["t"] < _ONECLAW_TTL:
+        return _ONECLAW_CACHE["text"]
+    try:
+        req = urllib.request.Request(ONECLAW_SHEET_CSV_URL, headers={"User-Agent": "clawd-web"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+        rows = [r for r in csv.DictReader(io.StringIO(raw)) if (r.get("Title") or "").strip()]
+        rows.sort(key=lambda r: (r.get("Date") or "").strip(), reverse=True)  # newest first; blank dates last
+        lines = []
+        for r in rows[:limit]:
+            d = (r.get("Date") or "").strip() or "upcoming"
+            title = (r.get("Title") or "").strip()
+            status = (r.get("Status") or "").strip()
+            summ = (r.get("Summary") or "").strip()
+            link = (r.get("Link") or "").strip()
+            line = f"{d} — {title}" + (f" ({status})" if status else "") + (f": {summ}" if summ else "")
+            if link:
+                line += f" [{link}]"
+            lines.append(line)
+        if not lines:
+            return _ONECLAW_CACHE["text"]
+        ctx = ("Latest 1Claw updates from the team's internal tracker (newest first):\n"
+               + "\n".join("- " + ln for ln in lines))
+        _ONECLAW_CACHE.update(t=now, text=ctx)
+        return ctx
+    except Exception as e:
+        print(f"[oneclaw-sheet] fetch failed: {e}")
+        return _ONECLAW_CACHE["text"]  # stale fallback if we have one
 # Optional: pin the hostname to a tailnet IP when MagicDNS isn't wired into the
 # OS resolver (common with open-source tailscaled on macOS). TLS still validates
 # against the real hostname — we only override which IP the socket connects to.
@@ -449,6 +505,15 @@ class Handler(BaseHTTPRequestHandler):
         msgs = []
         if HERMES_PERSONA:
             msgs.append({"role": "system", "content": HERMES_PERSONA})
+        # "What's new with 1Claw?" → feed the agent the latest tracker items so
+        # it always answers from the real, current list.
+        if _is_whats_new(text):
+            ctx = _oneclaw_recent_context()
+            if ctx:
+                msgs.append({"role": "system", "content": ctx + (
+                    "\n\nThe user is asking what's new with 1Claw. Answer using ONLY "
+                    "these items — name the latest few (about 3 to 5) in a natural, "
+                    "spoken sentence or two each. Don't invent anything not listed.")})
         msgs.append({"role": "user", "content": text})
         upstream_body = json.dumps({
             "model": HERMES_MODEL,
