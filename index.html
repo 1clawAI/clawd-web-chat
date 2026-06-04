@@ -2161,14 +2161,6 @@ async function onSend() {
   // lift any panic-stop mute so this turn speaks normally.
   _ttsMuted = false;
   ttsReset();
-  // Play an instant canned acknowledgement so there's no dead air while the
-  // agent thinks. It's enqueued ahead of the real answer and auto-dropped the
-  // moment real audio starts. No LLM / no key. Skip for short messages and
-  // bare greetings — the real reply lands faster than the stall would.
-  if (_ttsEnabled && !shouldSkipAck(userText)) {
-    openAckWindow();
-    ackSpeak();
-  }
 
   scrollToBottom(true);
   renderUserMessage(text, tab);
@@ -2669,37 +2661,6 @@ function ackTrace(...args) {
   if (!window.__clawdDebug) return;
   const dt = _ackTraceStart ? `+${Date.now() - _ackTraceStart}ms` : "0ms";
   console.log(`%c[clawd-ack ${dt}]`, "color:#ff8855;font-weight:bold", ...args);
-}
-
-// Instant canned acknowledgement to mask the agent's "thinking" gap — no LLM,
-// no key. Plays the moment you hit send; auto-dropped once the real answer's
-// audio starts (the "ack" kind is gated on _ttsRealAudioStarted downstream).
-const ACK_PHRASES = [
-  "one sec…", "let me check…", "hold on…", "okay, looking…", "on it…",
-  "let me see…", "give me a moment…", "checking now…", "alright, one moment…",
-  "hmm, let me look…", "right, looking into it…",
-];
-function pickAck() { return ACK_PHRASES[Math.floor(Math.random() * ACK_PHRASES.length)]; }
-
-async function ackSpeak() {
-  ackTrace("ackSpeak ENTER", { ttsEnabled: _ttsEnabled, ttsMode: _ttsMode, realAudioStarted: _ttsRealAudioStarted });
-  if (!_ttsEnabled || _ttsMuted) { closeAckWindow("ack-disabled"); return; }
-  if (_ttsRealAudioStarted) { closeAckWindow("ack-skip-realstarted"); return; }
-  const phrase = pickAck();
-  if (_ttsMode === "browser") {
-    try {
-      const u = new SpeechSynthesisUtterance(phrase.replace(/…/g, ""));
-      u.rate = 1.15; u.onstart = () => clawdVid.chatting(phrase);
-      speechSynthesis.speak(u);
-    } catch {}
-    closeAckWindow("ack-browser");
-    return;
-  }
-  try {
-    ttsEnqueue(phrase, "ack");   // fetches the blob + drains; unshifted to front
-  } finally {
-    closeAckWindow("ack-settled");
-  }
 }
 
 async function fillerSpeak({ kind, lastUser, toolName, toolInput, thinkingText, history }) {
