@@ -629,11 +629,11 @@ const clawdVid = (() => {
 
   function nextIdle() {
     const r = Math.random();
-    if (r < 0.005) return RARE_BURGER;        // ~0.5%
-    if (r < 0.02)  return RARE_MASK;          // ~1.5% — puts on the mask
-    if (r < 0.04)  return RARE_SMOKING;       // ~2%
-    if (r < 0.09)  return RARE_COFFEE;        // ~5% — occasional coffee sip
-    if (r < 0.16)  return FUNNY[Math.floor(Math.random() * FUNNY.length)];  // ~7% — funny bit
+    if (r < 0.01)  return RARE_BURGER;        // ~1%
+    if (r < 0.07)  return RARE_MASK;          // ~6% — puts on the mask (bumped so it actually shows)
+    if (r < 0.09)  return RARE_SMOKING;       // ~2%
+    if (r < 0.14)  return RARE_COFFEE;        // ~5% — occasional coffee sip
+    if (r < 0.21)  return FUNNY[Math.floor(Math.random() * FUNNY.length)];  // ~7% — funny bit
     return IDLES[Math.floor(Math.random() * IDLES.length)];
   }
 
