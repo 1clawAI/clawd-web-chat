@@ -573,6 +573,7 @@ const clawdVid = (() => {
   const RARE_SMOKING = "clawdassets/idle-smoking.mp4";
   const RARE_COFFEE  = "clawdassets/idle-sipping-coffee.mp4";
   const RARE_MASK    = "clawdassets/idle-guy-fawkes-mask.mp4";
+  const RARE_TEXTING = "clawdassets/idle-texting.mp4";
   // Funny rare idles — picked occasionally for personality.
   const FUNNY = [
     "clawdassets/idle-deal-with-it.mp4",
@@ -633,7 +634,8 @@ const clawdVid = (() => {
     if (r < 0.07)  return RARE_MASK;          // ~6% — puts on the mask (bumped so it actually shows)
     if (r < 0.09)  return RARE_SMOKING;       // ~2%
     if (r < 0.14)  return RARE_COFFEE;        // ~5% — occasional coffee sip
-    if (r < 0.21)  return FUNNY[Math.floor(Math.random() * FUNNY.length)];  // ~7% — funny bit
+    if (r < 0.19)  return RARE_TEXTING;       // ~5% — texting on his phone
+    if (r < 0.26)  return FUNNY[Math.floor(Math.random() * FUNNY.length)];  // ~7% — funny bit
     return IDLES[Math.floor(Math.random() * IDLES.length)];
   }
 

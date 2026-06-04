@@ -43,6 +43,7 @@ CLIPS = {
     "idle-deal-with-it.mp4": ("A pair of pixelated black sunglasses drops down from above and lands perfectly over his eyes; he gives a tiny smug nod — classic 'deal with it' meme energy.", 5),
     "idle-evil-laugh.mp4": ("Rubs his two claws together scheming, eyes narrowing, then tips his head back in a silent maniacal evil laugh, shoulders shaking, very pleased with himself.", 6),
     "idle-finger-guns.mp4": ("Points dual finger-guns (claw-guns) at the camera with a confident wink and a cocky smirk, then a little recoil like he fired them.", 5),
+    "idle-texting.mp4": ("Casually pulls out a sleek black smartphone in one claw, glances down and taps out a quick text with his thumb, the screen glow lighting his face, then a small satisfied smirk as he pockets it. Mouth stays closed — not talking.", 6),
     "idle-guy-fawkes-mask.mp4": ("Slowly raises a pale white theatrical mask with a wide upward-curled mustache, a thin pointed goatee, and arched eyebrows (plain white cheeks, no blush), places it over his face, then a sly confident head tilt.", 6),
     # talking
     "chatting_1.mp4": ("Talking to camera, natural mouth movement, relaxed gestures, occasional smirk.", 6),
